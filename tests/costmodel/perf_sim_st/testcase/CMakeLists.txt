@@ -33,6 +33,11 @@ find_package(Threads REQUIRED)
 
 set(ALL_TESTCASES
     gemm_perf_sim
+    gemm_sweep
+    gemm_fullk
+    gemm_dbc
+    gemm_accblock
+    gemm_asymbuf
     conv2d_perf_sim
     topk_perf_sim
     fa_perf_sim
