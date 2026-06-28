@@ -75,24 +75,20 @@ operand resident, reload the fast-L0A one. A bytes-only chooser ties here and ca
 pick the worse option. The winner flips with aspect (tall `m>n` → A-stationary),
 and the sim follows the **time**-weighted formula on every config.
 
-### The four algorithms (two used today, two recorded)
+### The design space — see `DESIGN_SPACE.md`
 
-1. **split-K** — `k<K`, both operands streamed, no reuse (`gemm_sweep`, baselines).
-2. **full-K** — `k==K`, one operand held stationary in L0, reused across the grid
-   (`gemm_fullk`). Stationary side picked by time-weighted `T_row/T_col`.
-3. **accumulator / C-blocking** — `NACC` L0C accumulators reuse the streamed A
-   across `NACC` columns while still splitting K; decouples A-reuse width from the
-   L0B cap (`NACC·m·n·bytes_c ≤ L0C`). Validated in `gemm_accblock`.
-4. **asymmetric-buffered full-K** — stationary operand single-buffered so it uses
-   the *full* L0 buffer (no ÷2), only the moving operand double-buffered. Same
-   traffic, better overlap. Validated in `gemm_asymbuf`.
+The "variants" we measured are **not distinct algorithms** — they are settings on
+four orthogonal axes that compose freely (tile size; operand reuse / stationarity;
+accumulator blocking `N_acc`; per-buffer buffering depth). `DESIGN_SPACE.md` is the
+canonical decomposition and the untangling table; each experiment below exercises
+one axis:
 
-### Two orthogonal axes (not four independent variants)
-
-The "four" collapse to **two axes**: a *reuse/tiling* choice (1: none → 2/3:
-operand reuse) and a *buffering* choice (4 + L0C-DB). (3) generalizes (2)'s reuse
-to the split case (C-resident instead of operand-resident); (4) and L0C-DB are
-buffering dials orthogonal to the tiling choice.
+| experiment | axis exercised |
+| --- | --- |
+| `gemm_sweep` | A — tile size / aspect (CUBE + L0A/L0B asymmetry) |
+| `gemm_fullk` | B — operand reuse direction (output- vs A- vs B-stationary) |
+| `gemm_accblock` | C — accumulator blocking `N_acc` |
+| `gemm_dbc`, `gemm_asymbuf` | D — buffering depth (L0C; moving-operand) |
 
 ### Regimes — when each shines (`compare.py`)
 
@@ -167,7 +163,8 @@ Needs `cmake`, a C++23 compiler, and GTest. The cost-model formula headers
 
 ```
 l0_tile_study/
-  README.md            this file
+  README.md            this file (experiments + findings)
+  DESIGN_SPACE.md      the untangled design space: orthogonal axes + decision rules
   common.py            paths, a2a3 constants, MAD formula, CSV reader, codegen helpers
   experiments.py       the five experiment generators (config -> testcase main.cpp)
   analyze.py           per-experiment validation of the perf-sim CSVs
