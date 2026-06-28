@@ -8,14 +8,19 @@
 
 using namespace pto;
 
-void ab_0_1() { RunGemmAccBlock<float, half, half, 512, 128, 512, 128, 64, 64, 1>(nullptr, nullptr, nullptr); }
-void ab_0_2() { RunGemmAccBlock<float, half, half, 512, 128, 512, 128, 64, 64, 2>(nullptr, nullptr, nullptr); }
-void ab_0_4() { RunGemmAccBlock<float, half, half, 512, 128, 512, 128, 64, 64, 4>(nullptr, nullptr, nullptr); }
-void ab_1_1() { RunGemmAccBlock<float, half, half, 512, 256, 512, 128, 64, 64, 1>(nullptr, nullptr, nullptr); }
-void ab_1_2() { RunGemmAccBlock<float, half, half, 512, 256, 512, 128, 64, 64, 2>(nullptr, nullptr, nullptr); }
-void ab_1_4() { RunGemmAccBlock<float, half, half, 512, 256, 512, 128, 64, 64, 4>(nullptr, nullptr, nullptr); }
-void ab_2_1() { RunGemmAccBlock<float, half, half, 512, 128, 512, 128, 64, 128, 1>(nullptr, nullptr, nullptr); }
-void ab_2_2() { RunGemmAccBlock<float, half, half, 512, 128, 512, 128, 64, 128, 2>(nullptr, nullptr, nullptr); }
+void ab_0_1() { RunGemmAccBlock<float, half, half, 512, 64, 512, 128, 64, 64, 1>(nullptr, nullptr, nullptr); }
+void ab_0_2() { RunGemmAccBlock<float, half, half, 512, 64, 512, 128, 64, 64, 2>(nullptr, nullptr, nullptr); }
+void ab_0_4() { RunGemmAccBlock<float, half, half, 512, 64, 512, 128, 64, 64, 4>(nullptr, nullptr, nullptr); }
+void ab_1_1() { RunGemmAccBlock<float, half, half, 512, 64, 512, 128, 64, 128, 1>(nullptr, nullptr, nullptr); }
+void ab_1_2() { RunGemmAccBlock<float, half, half, 512, 64, 512, 128, 64, 128, 2>(nullptr, nullptr, nullptr); }
+void ab_2_1() { RunGemmAccBlock<float, half, half, 512, 128, 512, 128, 64, 64, 1>(nullptr, nullptr, nullptr); }
+void ab_2_2() { RunGemmAccBlock<float, half, half, 512, 128, 512, 128, 64, 64, 2>(nullptr, nullptr, nullptr); }
+void ab_2_4() { RunGemmAccBlock<float, half, half, 512, 128, 512, 128, 64, 64, 4>(nullptr, nullptr, nullptr); }
+void ab_3_1() { RunGemmAccBlock<float, half, half, 512, 256, 512, 128, 64, 64, 1>(nullptr, nullptr, nullptr); }
+void ab_3_2() { RunGemmAccBlock<float, half, half, 512, 256, 512, 128, 64, 64, 2>(nullptr, nullptr, nullptr); }
+void ab_3_4() { RunGemmAccBlock<float, half, half, 512, 256, 512, 128, 64, 64, 4>(nullptr, nullptr, nullptr); }
+void ab_4_1() { RunGemmAccBlock<float, half, half, 512, 128, 512, 128, 64, 128, 1>(nullptr, nullptr, nullptr); }
+void ab_4_2() { RunGemmAccBlock<float, half, half, 512, 128, 512, 128, 64, 128, 2>(nullptr, nullptr, nullptr); }
 
 TEST(GemmAccBlock, All) {
     LAUNCH_KERNEL(ab_0_1, , (1, nullptr, nullptr));
@@ -23,7 +28,12 @@ TEST(GemmAccBlock, All) {
     LAUNCH_KERNEL(ab_0_4, , (1, nullptr, nullptr));
     LAUNCH_KERNEL(ab_1_1, , (1, nullptr, nullptr));
     LAUNCH_KERNEL(ab_1_2, , (1, nullptr, nullptr));
-    LAUNCH_KERNEL(ab_1_4, , (1, nullptr, nullptr));
     LAUNCH_KERNEL(ab_2_1, , (1, nullptr, nullptr));
     LAUNCH_KERNEL(ab_2_2, , (1, nullptr, nullptr));
+    LAUNCH_KERNEL(ab_2_4, , (1, nullptr, nullptr));
+    LAUNCH_KERNEL(ab_3_1, , (1, nullptr, nullptr));
+    LAUNCH_KERNEL(ab_3_2, , (1, nullptr, nullptr));
+    LAUNCH_KERNEL(ab_3_4, , (1, nullptr, nullptr));
+    LAUNCH_KERNEL(ab_4_1, , (1, nullptr, nullptr));
+    LAUNCH_KERNEL(ab_4_2, , (1, nullptr, nullptr));
 }

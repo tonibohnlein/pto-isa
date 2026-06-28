@@ -106,6 +106,8 @@ def gen_dbc():
 # that otherwise needs full-K. MTE1 should drop as NACC grows (A extracts / NACC).
 def gen_accblock():
     problems = [  # (M, N, K, baseK, baseM, baseN, [NACC, ...])
+        (512, 512, 64, 64, 128, 64, [1, 2, 4]),    # shares (M,N,K,tile) with fullk for cross-compare
+        (512, 512, 64, 64, 128, 128, [1, 2]),
         (512, 512, 128, 64, 128, 64, [1, 2, 4]),
         (512, 512, 256, 64, 128, 64, [1, 2, 4]),
         (512, 512, 128, 64, 128, 128, [1, 2]),

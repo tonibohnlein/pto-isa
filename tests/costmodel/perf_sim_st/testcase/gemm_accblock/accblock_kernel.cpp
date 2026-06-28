@@ -75,17 +75,13 @@ AICORE inline void RunGemmAccBlock(__gm__ T *out, __gm__ U *src0, __gm__ S *src1
             }
             for (uint32_t kk = 0; kk < kLoop; kk++) {
                 // Extract A[i,kk] once; it feeds all NACC MACs this kk.
+                // Operands L1-resident (autotiler scope is L1->L0): only L1->L0 extracts.
                 WaitFlag<PIPE_M, PIPE_MTE1>(0);
-                GlobalDataSrcA gmA(src0 + i * baseM * K + kk * baseK);
-                TLOAD(aMatTile, gmA);
                 TEXTRACT(aTile, aMatTile, 0, 0);
                 SetFlag<PIPE_MTE1, PIPE_M>(0);
                 WaitFlag<PIPE_MTE1, PIPE_M>(0); // A ready (cube waits once)
                 for (uint32_t a = 0; a < NACC; a++) {
-                    const uint32_t jcol = jb * NACC + a;
                     WaitFlag<PIPE_M, PIPE_MTE1>(1);
-                    GlobalDataSrcB gmB(src1 + jcol * baseN * K + kk * baseK);
-                    TLOAD(bMatTile, gmB);
                     TEXTRACT(bTile, bMatTile, 0, 0);
                     SetFlag<PIPE_MTE1, PIPE_M>(1);
                     WaitFlag<PIPE_MTE1, PIPE_M>(1); // B ready

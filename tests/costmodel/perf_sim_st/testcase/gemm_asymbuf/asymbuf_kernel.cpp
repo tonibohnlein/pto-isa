@@ -68,9 +68,8 @@ AICORE inline void RunGemmFullKAsymBuf(__gm__ T *out, __gm__ U *src0, __gm__ S *
 
     for (uint32_t i = 0; i < mLoop; i++) {
         // Extract the stationary A[i] row panel once; held across all columns.
+        // Operands L1-resident (autotiler scope is L1->L0): only L1->L0 extracts.
         WaitFlag<PIPE_M, PIPE_MTE1>(2);
-        GlobalDataSrcA gmA(src0 + i * baseM * K);
-        TLOAD(aMatTile, gmA);
         TEXTRACT(aTile, aMatTile, 0, 0);
         SetFlag<PIPE_MTE1, PIPE_M>(2);
         WaitFlag<PIPE_MTE1, PIPE_M>(2); // A ready (waited once per row)
@@ -78,8 +77,6 @@ AICORE inline void RunGemmFullKAsymBuf(__gm__ T *out, __gm__ U *src0, __gm__ S *
         for (uint32_t j = 0; j < nLoop; j++) {
             const uint32_t b = j % MOVDB;
             WaitFlag<PIPE_M, PIPE_MTE1>(b); // B slot b free (MAD that used it is done)
-            GlobalDataSrcB gmB(src1 + j * baseN * K);
-            TLOAD(bMatTile[b], gmB);
             TEXTRACT(bTile[b], bMatTile[b], 0, 0);
             SetFlag<PIPE_MTE1, PIPE_M>(b);
             WaitFlag<PIPE_MTE1, PIPE_M>(b); // B[b] ready

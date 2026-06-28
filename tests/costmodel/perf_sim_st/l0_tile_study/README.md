@@ -63,7 +63,7 @@ Memory-bound optimum aspect: `m:n = (bytes_b·BW_A)/(bytes_a·BW_B) = 2:1` for b
 | --- | --- | --- | --- |
 | `gemm_sweep` | (reuses `gemm_performance`) | CUBE closed form + L0A/L0B asymmetry | CUBE exact 41/41; tall tile never loses to its transpose on MTE1 |
 | `gemm_fullk` | `fullk_reuse_kernel.cpp` | full-K reuse + stationary choice | reuse cuts MTE1 **37–77%**; stationary winner = **bandwidth-weighted** `T_row/T_col` (10/10), aspect-dependent; **bytes-only mis-picks 2/10** (symmetric tiles) |
-| `gemm_dbc` | `dbc_kernel.cpp` | L0C double-buffering | hiding the exposed FIXPIPE drain wins **13–27%** wall, even vs the larger single-buffer tile |
+| `gemm_dbc` | `dbc_kernel.cpp` | L0C double-buffering | hiding the exposed FIXPIPE drain wins **13–37%** wall (resident operands), even vs the larger single-buffer tile |
 | `gemm_accblock` | `accblock_kernel.cpp` | **variant 3**: accumulator/C-blocking | `NACC` L0C accumulators give split-K A-reuse (MTE1 → ~B-only floor) without needing full-K |
 | `gemm_asymbuf` | `asymbuf_kernel.cpp` | **variant 4**: asymmetric buffering | double-buffering only the *moving* operand cuts wall **6–9%** at identical MTE1 |
 
@@ -87,6 +87,68 @@ and the sim follows the **time**-weighted formula on every config.
    the *full* L0 buffer (no ÷2), only the moving operand double-buffered. Same
    traffic, better overlap. Validated in `gemm_asymbuf`.
 
+### Two orthogonal axes (not four independent variants)
+
+The "four" collapse to **two axes**: a *reuse/tiling* choice (1: none → 2/3:
+operand reuse) and a *buffering* choice (4 + L0C-DB). (3) generalizes (2)'s reuse
+to the split case (C-resident instead of operand-resident); (4) and L0C-DB are
+buffering dials orthogonal to the tiling choice.
+
+### Regimes — when each shines (`compare.py`)
+
+Cross-comparing split-K / full-K / accumulator-blocking at matched tiles
+(resident operands) shows the reuse algorithms cut MTE1 hard — full-K deepest
+(k==K), accblock between, split-K the floor — **but on these 512² tiles every
+case is FIXPIPE-bound** (`fixp ≈ 12.9k` ≫ `mte1, cube`). So the MTE1 saving is
+*free headroom, not speedup*: the wall is set by the drain. The lesson is regime-
+dependent:
+
+| regime | bound | what wins |
+| --- | --- | --- |
+| skinny / large-K (little drain, heavy reload) | **MTE1** | operand **reuse** (full-K / accblock) |
+| small-K, large output (slow drain) | **FIXP** | **L0C double-buffering** (hide the drain) |
+| large-K square | **CUBE** | the **biggest tile** (least head); reuse is headroom |
+
+So no single algorithm dominates — the chooser must pick by the predicted bound.
+
+### Always double-buffer A/B/C? No.
+
+- **Moving** operands: yes (overlap load with compute — the roofline assumption).
+- **Stationary** operand (full-K): **no** — single-buffer it so it uses the full
+  L0 buffer (variant 4); double-buffering a held panel only wastes capacity.
+- **L0C**: double-buffer when the drain is *exposed* (single-L0C stalls the cube
+  per drain) and the tile still fits L0C/2 — worth 13–37% here, most in the
+  FIXP-bound regime; not worth halving C0 when the drain is already hidden.
+
+## References & standard terminology
+
+These algorithms are **textbook** — none is a new tiling scheme. Map to the canon:
+
+| our variant | literature name | cite |
+| --- | --- | --- |
+| 1. "split-K" (serial-K accum.) | **output-stationary** blocked GEMM | Lam-Rothberg-Wolf ASPLOS'91; Eyeriss ISCA'16 |
+| 2. full-K operand-stationary | Goto **GEBP block-panel**; **weight/input-stationary** | Goto & van de Geijn TOMS'08; Eyeriss'16; TPU ISCA'17 |
+| 3. accumulator / C-blocking | **register tiling** / rank-k with C resident (`N_acc` = `nr`) | Goto'08 §6.1; Smith et al. IPDPS'14; ATLAS'01 |
+| 4. double-buffering | **multistage / software-pipelined** mainloop | CUTLASS efficient_gemm; TPU "+1 for double-buffering" |
+
+Key URLs: Goto'08 `cs.utexas.edu/~flame/pubs/GotoTOMS.pdf` · BLIS many-threaded
+`.../blis3_ipdps14.pdf` · CUTLASS `github.com/NVIDIA/cutlass/blob/main/media/docs/cpp/efficient_gemm.md`
+· Eyeriss `people.csail.mit.edu/emer/media/papers/2016.06.isca.eyeriss_architecture.pdf`
+· Stream-K `arxiv.org/abs/2301.03598`.
+
+**⚠ Naming:** our **"split-K" is a misnomer** — in CUDA/CUTLASS, *split-K* means
+partitioning K across *parallel* workers that then *reduce* partials (atomics or a
+reduction kernel). Ours has no parallel reduction; it is **serial-K accumulation**.
+Worth renaming in pass + study to avoid confusion.
+
+**Not yet considered** (mostly *above* the L0 boundary): parallel split-K +
+cross-core/atomic reduction, **Stream-K** (load-balanced K, fixes wave
+quantization), threadblock **rasterization/swizzle** (L2 reuse), **producer/
+consumer (TMA-style) pipelining** and **multi-stage `kStages>2`** buffering (richer
+variant 4, genuinely at L0), persistent kernels, sliced-K. Strassen/sub-cubic is a
+poor fit for a fixed-tile cube. The genuine novelty, if any, is **the per-shape
+cost-model solver** that picks among these — not the primitives.
+
 ## Reproduce
 
 `run.py` generates each `testcase/<name>/main.cpp`, builds it under `__COSTMODEL`,
@@ -109,6 +171,7 @@ l0_tile_study/
   common.py            paths, a2a3 constants, MAD formula, CSV reader, codegen helpers
   experiments.py       the five experiment generators (config -> testcase main.cpp)
   analyze.py           per-experiment validation of the perf-sim CSVs
+  compare.py           cross-comparison: split-K vs full-K vs accblock at matched tiles
   run.py               generate -> build -> run -> analyze
   results/             generated CSVs + index json (git-ignored)
 testcase/gemm_{sweep,fullk,dbc,accblock,asymbuf}/   kernels + generated main.cpp
@@ -116,9 +179,13 @@ testcase/gemm_{sweep,fullk,dbc,accblock,asymbuf}/   kernels + generated main.cpp
 
 ## Caveats
 
-- **MTE2 noise.** `gemm_dbc`/`gemm_asymbuf` totals include `GM→L1`, absent in the
-  resident-operand case — so the wall-clock wins shown are **conservative**.
-- **Store target.** Kernels store L0C→GM (70 GB/s); chained-matmul drains L0C→L1
-  (128 GB/s). Magnitudes scale, the exposure/overlap conclusions hold.
+- **Operands are modeled L1-resident** (the custom kernels issue no `GM→L1`
+  `TLOAD`, only `L1→L0` `TEXTRACT`), so MTE2 is excluded *by construction* — the
+  faithful L1→L0 scope. `gemm_sweep` reuses the reference kernel (which does load)
+  but is read on MTE1 only, so it is unaffected.
+- **Store target (the live caveat).** Kernels drain L0C→GM (70 GB/s), which makes
+  these 512² problems FIXPIPE-bound; chained-matmul drains L0C→L1 (128 GB/s, ~half
+  the FIXP), shifting the bound toward CUBE/MTE1. The exposure/overlap conclusions
+  hold; the *regime* read depends on the drain target.
 - **a5** numbers are not yet measured; the eventual chooser parameterizes the cost
   model per arch (a2a3 real, a5 placeholder).

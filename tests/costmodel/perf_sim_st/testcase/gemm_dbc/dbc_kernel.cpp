@@ -77,10 +77,8 @@ AICORE inline void RunGemmSplitKDBC(__gm__ T *out, __gm__ U *src0, __gm__ S *src
             WaitFlag<PIPE_FIX, PIPE_M>(b);
             for (uint32_t kk = 0; kk < kLoop; kk++) {
                 WaitFlag<PIPE_M, PIPE_MTE1>(0); // operand slot free
-                GlobalDataSrcA gmA(src0 + i * baseM * K + kk * baseK);
-                GlobalDataSrcB gmB(src1 + j * baseN * K + kk * baseK);
-                TLOAD(aMatTile, gmA);
-                TLOAD(bMatTile, gmB);
+                // Operands are L1-resident (the autotiler's scope is L1->L0): no GM->L1
+                // TLOAD, only the L1->L0 TEXTRACT. This removes MTE2 from the wall-clock.
                 TEXTRACT(aTile, aMatTile, 0, 0);
                 TEXTRACT(bTile, bMatTile, 0, 0);
                 SetFlag<PIPE_MTE1, PIPE_M>(0);

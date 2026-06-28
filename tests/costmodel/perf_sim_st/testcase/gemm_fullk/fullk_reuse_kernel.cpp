@@ -82,14 +82,11 @@ AICORE inline void RunGemmFullKReuse(__gm__ T *out, __gm__ U *src0, __gm__ S *sr
 
             // Wait until the previous MAD released L0A/L0B before overwriting them.
             WaitFlag<PIPE_M, PIPE_MTE1>(0);
+            // Operands L1-resident (autotiler scope is L1->L0): only L1->L0 extracts.
             if (refreshA) {
-                GlobalDataSrcA gmA(src0 + i * baseM * K);
-                TLOAD(aMatTile, gmA);
                 TEXTRACT(aTile, aMatTile, 0, 0);
             }
             if (refreshB) {
-                GlobalDataSrcB gmB(src1 + j * baseN * K);
-                TLOAD(bMatTile, gmB);
                 TEXTRACT(bTile, bMatTile, 0, 0);
             }
             SetFlag<PIPE_MTE1, PIPE_M>(0);
