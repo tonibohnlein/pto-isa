@@ -78,17 +78,18 @@ and the sim follows the **time**-weighted formula on every config.
 ### The design space — see `DESIGN_SPACE.md`
 
 The "variants" we measured are **not distinct algorithms** — they are settings on
-four orthogonal axes that compose freely (tile size; operand reuse / stationarity;
-accumulator blocking `N_acc`; per-buffer buffering depth). `DESIGN_SPACE.md` is the
-canonical decomposition and the untangling table; each experiment below exercises
-one axis:
+**three** orthogonal axes that compose freely (per the BLIS loops-around-the-
+micro-kernel form): **(1) tile sizes per level** — L0 block + accumulator micro-tile
+`N_acc`; **(2) loop order → operand stationarity**; **(3) per-buffer pipeline
+depth**. `DESIGN_SPACE.md` is the canonical decomposition (with cited decision
+rules); each experiment exercises one axis:
 
 | experiment | axis exercised |
 | --- | --- |
-| `gemm_sweep` | A — tile size / aspect (CUBE + L0A/L0B asymmetry) |
-| `gemm_fullk` | B — operand reuse direction (output- vs A- vs B-stationary) |
-| `gemm_accblock` | C — accumulator blocking `N_acc` |
-| `gemm_dbc`, `gemm_asymbuf` | D — buffering depth (L0C; moving-operand) |
+| `gemm_sweep` | 1 — tile size / aspect (CUBE + L0A/L0B asymmetry) |
+| `gemm_fullk` | 2 — operand stationarity (output- vs A- vs B-stationary) |
+| `gemm_accblock` | 1 — accumulator micro-tile `N_acc` (= `mr×nr`, the finer level) |
+| `gemm_dbc`, `gemm_asymbuf` | 3 — pipeline depth (L0C; moving-operand) |
 
 ### Regimes — when each shines (`compare.py`)
 
