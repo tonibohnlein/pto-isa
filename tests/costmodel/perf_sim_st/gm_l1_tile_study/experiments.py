@@ -124,9 +124,43 @@ def gen_splitk():
     return _save_index("splitk", index)
 
 
+# ----------------------------------------------------------------------------- chain
+# Chained matmul (C = A*B, E = C*D): validates the model's produced-operand EXCLUSION.
+# cube_operand_reload() walks the {MM1,MM2} subgraph and charges GM reload only for
+# BOUNDARY operands (A,B,D); the intermediate C is `produced` on-chip and never hits
+# DDR. We can't keep C on-chip with the single-matmul RunGemmE2E, so we measure MM1 and
+# MM2 SEPARATELY (two single-core runs) and decompose: the C round-trip that fusion
+# eliminates is exactly MM1's C-store (fixp) + MM2's C-reload (the lhs half of its mte2).
+# Sweeping the shared dim Ki=N1=K2 shows the round-trip (the fusion saving) scale with it
+# while the boundary reloads (A,B,D) stay put. This validates the cost-model accounting;
+# the fused lowering (C resident in L1) is a separate lowering concern, not scored here.
+def gen_chain():
+    M = 512        # rows of A, C, E
+    K1 = 512       # contraction of MM1 (cols of A)
+    N2 = 512       # cols of D, E
+    bm = bn = 128
+    bk = 64
+    assert _fits(bm, bk, bn)
+    defs, fids, index = [], [], []
+    for Ki in (128, 256, 512):     # shared dim: N1 (cols of C) = K2 (contraction of MM2)
+        if Ki % bn or Ki % bk:
+            continue
+        # MM1: A[M,K1] * B[K1,Ki] -> C[M,Ki]
+        f1 = f"ch{Ki}_mm1"
+        defs.append(C.emit_e2e(f1, M, K1, Ki, bm, bk, bn))
+        # MM2: C[M,Ki] * D[Ki,N2] -> E[M,N2]
+        f2 = f"ch{Ki}_mm2"
+        defs.append(C.emit_e2e(f2, M, Ki, N2, bm, bk, bn))
+        fids += [f1, f2]
+        index.append(dict(Ki=Ki, M=M, K1=K1, N2=N2, bm=bm, bk=bk, bn=bn, mm1=f1, mm2=f2))
+    C.write_testcase("gml1_chain", "gemm_performance_kernel.cpp", defs, fids, "Gml1Chain")
+    return _save_index("chain", index)
+
+
 ALL = {
     "gml1_reload": gen_reload,
     "gml1_roofline": gen_roofline,
     "gml1_stepk": gen_stepk,
     "gml1_splitk": gen_splitk,
+    "gml1_chain": gen_chain,
 }

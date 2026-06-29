@@ -48,6 +48,7 @@ takes the `max` over the DDR and compute pipes.
 | reload bytes independent of `stepK` | `gml1_stepk` | mte2 **exactly** flat across stepK∈{1,2,4} |
 | split-K: feed/compute `~ Kc`, store a constant floor | `gml1_splitk` | `mte2/Kc` flat (104.5), `cube ∝ Kc`, `fixp` 0.0% spread; bound flips MTE2→FIXP at the knee |
 | output store width = **output dtype (2 B)**, not 4-B accumulator | `gml1_splitk` | `fixp = M·N·2/70` to +0.1% (512² and 1024²) |
+| chained matmul: intermediate C **excluded** from GM reload | `gml1_chain` | per-term error ≤0.1%; C round-trip = mm1 store + mm2 C-reload; fusion saves 23→30% as Ki grows |
 
 ### Where `max(feed, writes)` is optimistic [M]
 
@@ -76,6 +77,19 @@ The store-width subtlety: the FixPipe drains the **fp32** L0C accumulator to GM 
 512² and 1024²). So `out_store`'s `bytes_c` is the **output (drain) dtype**, not the
 4-byte accumulator. mlsys26 uses `dtype_bytes(output tensor)` — correct iff that output
 is bf16; an fp32-output matmul would be charged 2× the sim's store floor.
+
+### Chained matmul: the intermediate never hits DDR (`gml1_chain`)
+
+`cube_operand_reload()` walks the matmul subgraph and charges GM reload only for
+**boundary** operands (`!produced.count(operand)`); an intermediate `C` produced by
+`MM1` and consumed by `MM2` is on-chip ephemeral and excluded. With the single-matmul
+`RunGemmE2E` we can't keep `C` resident, so we measure `MM1` (`A·B→C`) and `MM2`
+(`C·D→E`) separately and decompose the GM traffic. The **C round-trip** that fusion
+eliminates is exactly `MM1`'s C-store (`fixp`) + `MM2`'s C-reload (the lhs half of its
+`mte2`); each term matches the model to ≤0.1%. Sweeping the shared dim `Ki = N1 = K2`,
+the round-trip scales `~ M·Ki` (saving 23→30% of total GM traffic) while the boundary
+reloads `A,B,D` are unchanged — the cost-model accounting. (This validates *which*
+traffic fusion removes; whether the lowering keeps `C` in L1 is a separate concern.)
 
 ## Multi-core (the `par` cap)
 
@@ -106,9 +120,11 @@ experiment under `PTO_BW_MODE=fitted` and re-fit `eff_GiB/s`).
 
 ## Caveats
 
-- Single matmul, single core, output-stationary (`RunGemmE2E`'s only mode). Split-K
-  **sink** reduction is exercised per-worker (`gml1_splitk`); chained matmuls and the
-  multi-core aggregate (`S·store` HBM contention via `par()`) are not yet exercised.
+- Single core, output-stationary (`RunGemmE2E`'s only mode). Split-K **sink** reduction
+  is exercised per-worker (`gml1_splitk`); chained matmul reload accounting is exercised
+  by decomposition (`gml1_chain`, two separate runs). Not yet exercised: a truly fused
+  lowering (C resident in L1) and the multi-core aggregate (`S·store` HBM contention via
+  `par()`).
 - The flat-vs-fitted gap is measured indirectly (the default build is flat); a
   `PTO_BW_MODE=fitted` sweep would measure the fitted curve directly.
 - `bytes_a = bytes_b = 2` (bf16) throughout; fp32 operands (`cpr=2`, `kt=8`) change

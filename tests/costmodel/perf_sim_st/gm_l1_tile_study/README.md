@@ -70,6 +70,7 @@ into bigger L1 panels — they do **not** change the total bytes.
 | **gml1_roofline** | `total == max(mte2,mte1,cube,fixp)` (overlap, not sum) across regimes | `t/max ≈ 1.00–1.06`, `t/sum ≈ 0.45` for 4/5 regimes → pipes overlap, feed/drain are separate |
 | **gml1_stepk** | MTE2 invariant to K-staging depth | mte2 **exactly** flat across `stepK∈{1,2,4}` → model correctly omits a stepK term |
 | **gml1_splitk** | split-K sink: feed/compute `~ Kc=K/S`, output store a constant floor | `mte2/Kc` flat (104.5), `cube ∝ Kc`, `fixp` 0.0% spread; bound flips MTE2→FIXP at the knee — validates `eval_S` |
+| **gml1_chain** | chained `C=A·B`, `E=C·D`: intermediate C excluded from GM reload | per-term error **≤0.1%**; the C round-trip (mm1 store + mm2 C-reload) is exactly what fusion drops — **23→30% saving** as Ki grows |
 
 ### The one regime where `max` is optimistic
 

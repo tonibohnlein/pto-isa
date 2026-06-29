@@ -121,9 +121,45 @@ def analyze_splitk():
     print("     par() HBM cap is not single-core visible.)")
 
 
+# ----------------------------------------------------------------------------- chain
+def analyze_chain():
+    print("\n=== chain: intermediate C is produced on-chip -> excluded from GM reload ===")
+    rows = sorted(_index("chain"), key=lambda r: r["Ki"])
+    print(f"  {'Ki':>4} | {'mm1.mte2':>9} {'mm2.mte2':>9} {'mm1.fixp':>9} {'mm2.fixp':>9} | "
+          f"{'C_round':>8} {'unfused':>8} {'fused':>8} {'save%':>6}")
+    errs = []
+    for x in rows:
+        d1, d2 = C.read_aic(x["mm1"]), C.read_aic(x["mm2"])
+        M, K1, N2, Ki, bm, bn = x["M"], x["K1"], x["N2"], x["Ki"], x["bm"], x["bn"]
+        # Model reload-byte terms (bf16 operands ba=bb=2; intermediate C bf16 bc=2).
+        ab = C.reload_bytes(M, Ki, K1, bm, bn)               # MM1: A + B (N1 = Ki)
+        cd = C.reload_bytes(M, N2, Ki, bm, bn)               # MM2: C + D (K2 = Ki)
+        c_reload = M * N2 * Ki / bn * 2                       # C as MM2's lhs (reloads with N-tiling)
+        c_store = C.store_bytes(M, Ki)                       # MM1 drains C (bf16)
+        e_store = C.store_bytes(M, N2)                       # MM2 drains E (bf16)
+        # Predicted vs measured (each term already validated in isolation).
+        for pred_bytes, bw, sim in ((ab, C.BW_GM_L1, d1["mte2"]), (cd, C.BW_GM_L1, d2["mte2"]),
+                                    (c_store, C.BW_L0C_GM, d1["fixp"]), (e_store, C.BW_L0C_GM, d2["fixp"])):
+            p = C.transfer_cycles(pred_bytes, bw)
+            errs.append(abs(sim - p) / p * 100 if p else 0.0)
+        # Fusion accounting (cycles): the round-trip fusion removes = C store + C reload.
+        c_round = d1["fixp"] + C.transfer_cycles(c_reload, C.BW_GM_L1)
+        unfused = d1["mte2"] + d1["fixp"] + d2["mte2"] + d2["fixp"]
+        fused = unfused - c_round
+        save = c_round / unfused * 100 if unfused else 0.0
+        print(f"  {Ki:>4} | {d1['mte2']:>9} {d2['mte2']:>9} {d1['fixp']:>9} {d2['fixp']:>9} | "
+              f"{c_round:>8.0f} {unfused:>8} {fused:>8.0f} {save:>5.1f}%")
+    print(f"  per-term prediction error (A+B, C+D, C-store, E-store) max |err|: {max(errs):.1f}%")
+    print("  -> each matmul's reload/store matches the model; the C round-trip = mm1.fixp +")
+    print("     C-reload is exactly what cube_operand_reload() drops by excluding `produced` C.")
+    print("     Fusion saving grows with the intermediate Ki (C round-trip ~ M*Ki), while the")
+    print("     boundary reloads (A,B,D) are unchanged -- the model's chained accounting.")
+
+
 ALL = {
     "gml1_reload": analyze_reload,
     "gml1_roofline": analyze_roofline,
     "gml1_stepk": analyze_stepk,
     "gml1_splitk": analyze_splitk,
+    "gml1_chain": analyze_chain,
 }
