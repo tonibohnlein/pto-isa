@@ -1,0 +1,154 @@
+# Copyright (c) 2025 Huawei Technologies Co., Ltd.
+# Shared constants, the analytic a2a3 GM->L1 cost model, and a perf-sim CSV reader
+# for the GM->L1-tile cost-model study. See README.md for the full write-up.
+#
+# This is the *sibling* study to l0_tile_study/. Where that study scopes the L1->L0
+# boundary (compute-bound, operands L1-resident, validates the CUBE/MTE1 pipes),
+# THIS study scopes the GM<->L1 boundary (memory-bound, operands streamed from HBM,
+# validates the MTE2 / GM->L1 reload pipe + the FixPipe drain + the max-roofline).
+# It reuses the same gemm_performance reference kernel (RunGemmE2E), whose TLOADs
+# (GM->L1, MatTile) are exactly the operand reload our mlsys26 cube model predicts.
+
+import csv
+import pathlib
+
+# --- paths (self-contained; results land under results/) ---
+STUDY_DIR = pathlib.Path(__file__).resolve().parent
+PERF_SIM_ROOT = STUDY_DIR.parent                      # tests/costmodel/perf_sim_st
+TESTCASE_DIR = PERF_SIM_ROOT / "testcase"
+KERNEL_INCLUDE = "../../../kernels/manual/a2a3/gemm_performance"  # for CMake include dir
+RESULTS_DIR = STUDY_DIR / "results"
+CSV_DIR = RESULTS_DIR / "perf_sim_output"             # where LAUNCH_KERNEL writes summaries
+
+# --- a2a3 cost-model constants (pto-isa include/pto/costmodel/arch_config.hpp) ---
+# BandwidthTable field order is the source of truth for these (see arch_config.hpp:46).
+FREQ_HZ = 1.85e9
+BW_GM_L1 = 135.0      # GB/s  (GM -> L1, the MTE2 reload port; flat/legacy a2a3 value)
+BW_GM_UB = 100.9      # GB/s  (GM -> UB, vector reload)
+BW_L1_GM = 32.0       # GB/s  (L1 -> GM)
+BW_L0C_GM = 70.0      # GB/s  (FIXPIPE drain L0C -> GM, the matmul output store)
+BW_L0C_L1 = 128.0     # GB/s  (FIXPIPE drain L0C -> L1)
+BW_L1_L0A = 441.0     # GB/s  (L1 -> L0A, the cube's A/"left" port)
+BW_L1_L0B = 220.5     # GB/s  (L1 -> L0B, the B/"right" port; exactly half of A)
+
+# Fitted (on-device) GM->L1 Hill params (arch_config.hpp MakeFittedHillModel, PTO_BW_MODE=fitted):
+#   HillBw(bytes) = 28.61 * bytes / (1107 + bytes)   -> saturates at 28.61 GiB/s, ~4.7x below flat.
+# Our mlsys26 cube model hardcodes bw_gm_l1 = 135 (flat); this study quantifies that gap.
+BW_GM_L1_FITTED_PEAK = 28.61
+BW_GM_L1_FITTED_K = 1107.0
+
+# --- buffer capacities (bytes) ---
+L0A = L0B = 64 * 1024
+L0C = 128 * 1024
+L0_PING = 32 * 1024   # per ping-pong slot when an operand buffer is double-buffered
+L1 = 512 * 1024       # a2a3 L1 capacity
+
+BYTES = {"bf16": 2, "fp32": 4}
+
+
+def ceil_div(a, b):
+    return (a + b - 1) // b
+
+
+def divisors(d, align=16, lo=16):
+    return [x for x in range(lo, d + 1, align) if d % x == 0]
+
+
+def reload_bytes(M, N, K, bm, bn, bytes_a=2, bytes_b=2):
+    """GM->L1 operand reload volume for one core, output-stationary (RunGemmE2E).
+
+    Our mlsys26 cube model's cube_operand_reload():
+        reload = M*N*K/bn * bytes_a   (A panel reloaded once per N-block: N/bn times)
+               + M*N*K/bm * bytes_b   (B panel reloaded once per M-block: M/bm times)
+    This is exactly the byte volume RunGemmE2E's TLOADs issue (the K-staging knobs
+    stepKa/stepKb only batch the TLOADs, they do NOT change the total bytes).
+    """
+    return M * N * K / bn * bytes_a + M * N * K / bm * bytes_b
+
+
+def store_bytes(M, N, bytes_c=4):
+    """L0C->GM matmul output store (the FixPipe drain), shape-only."""
+    return M * N * bytes_c
+
+
+def transfer_cycles(byts, bw_gibs):
+    """Perf-sim memory-pipe busy cycles for `byts` at `bw_gibs` GiB/s (flat model).
+
+    Mirrors EstimateBandwidthCycles: bytes / 2**30 / bw * freq_hz. The flat a2a3
+    table value (e.g. BW_GM_L1=135) is interpreted as GiB/s here.
+    """
+    return byts / (1024.0 ** 3) / bw_gibs * FREQ_HZ
+
+
+def mad_cycles(m, k, n, bytes_a=2):
+    """Cube MAD cost (pto-isa formula_backend_compute.hpp): one TMATMUL call."""
+    kt = 32 // bytes_a            # 16 (bf16) / 8 (fp32)
+    cpr = 2 if bytes_a == 4 else 1
+    return 6 + cpr * ceil_div(m, 16) * ceil_div(k, kt) * ceil_div(n, 16)
+
+
+def cube_cycles(M, N, K, bm, bk, bn, bytes_a=2):
+    """Total cube cycles over the (M/bm)(N/bn)(K/bk) tile grid."""
+    return (M // bm) * (N // bn) * (K // bk) * mad_cycles(bm, bk, bn, bytes_a)
+
+
+def read_aic(fid):
+    """Return the AIC-row pipe busy cycles for kernel function `fid`."""
+    p = CSV_DIR / f"{fid}_pipeline_summary.csv"
+    with p.open() as f:
+        for r in csv.DictReader(f):
+            if r["unit"] == "AIC":
+                return dict(
+                    total=int(r["total_cycles"]),
+                    mte2=int(r["mte2_aic_cycles"]),
+                    mte1=int(r["mte1_cycles"]),
+                    cube=int(r["cube_cycles"]),
+                    fixp=int(r["fixp_cycles"]),
+                )
+    raise RuntimeError(f"no AIC row in {p}")
+
+
+# RunGemmE2E<float,half,half,float, blockDim, m,k,n, valid..., singleCore..., base..., steps>
+# bf16 operands, fp32 accumulate -- the autotiler's default GEMM dtypes. Single core
+# (blockDim=1, singleCore = whole problem) isolates the per-core reload our model scores.
+def emit_e2e(fid, M, K, N, bm, bk, bn, stepKa=1, stepKb=1):
+    """A single-core GM->L1 GEMM call (the gemm_performance reference, RunGemmE2E)."""
+    return (
+        f"void {fid}() {{ RunGemmE2E<float, half, half, float, 1, "
+        f"{M}, {K}, {N}, {M}, {K}, {N}, {M}, {K}, {N}, "
+        f"{bm}, {bk}, {bn}, 1, {stepKa}, {stepKb}, 1>"
+        f"(nullptr, nullptr, nullptr); }}"
+    )
+
+
+CMAKE_TEMPLATE = (
+    "pto_costmodel_sim_st({name})\n"
+    "target_include_directories({name} PRIVATE\n"
+    "    ${{PROJECT_SOURCE_DIR}}/" + KERNEL_INCLUDE + "\n"
+    ")\n"
+    "target_compile_options({name} PRIVATE -D__DAV_C220_CUBE__ -D__DAV_CUBE__ -D__DAV_VEC__)\n"
+)
+
+MAIN_HEADER = """// AUTO-GENERATED by gm_l1_tile_study (run.py). Do not edit by hand.
+#include <pto/pto-inst.hpp>
+#include <pto/common/constants.hpp>
+#include <pto/costmodel/perf_sim/launch.hpp>
+#include <gtest/gtest.h>
+
+#include "{kernel_include}"
+
+using namespace pto;
+"""
+
+
+def write_testcase(name, kernel_include, fn_defs, fids, test_suite):
+    """Write testcase/<name>/{main.cpp, CMakeLists.txt}."""
+    tc = TESTCASE_DIR / name
+    tc.mkdir(parents=True, exist_ok=True)
+    body = [MAIN_HEADER.format(kernel_include=kernel_include)]
+    body += fn_defs
+    body.append(f"\nTEST({test_suite}, All) {{")
+    body += [f"    LAUNCH_KERNEL({fid}, , (1, nullptr, nullptr));" for fid in fids]
+    body.append("}")
+    (tc / "main.cpp").write_text("\n".join(body) + "\n")
+    (tc / "CMakeLists.txt").write_text(CMAKE_TEMPLATE.format(name=name))

@@ -1,0 +1,90 @@
+# GM→L1-tile cost-model study
+
+A perf-sim study that validates the analytic **GM↔L1** cost model behind PyPTO's
+GM→L1 autotiler — the reload / output-store terms our mlsys26 Ascend-910B cube
+cost model scores (`Ascend910BCost::cube_operand_reload` + the cube DDR roofline).
+It is the **sibling** of `l0_tile_study/`: that study scopes the L1→L0 boundary
+(compute-bound); this one scopes the GM↔L1 boundary (memory-bound).
+
+Everything builds under `-D__COSTMODEL` and runs the **host** pipeline simulator —
+no NPU required. One command reproduces all of it:
+
+```bash
+python run.py            # generate -> build -> run -> analyze, all experiments
+python run.py gml1_reload # a single experiment
+python run.py --no-build  # re-analyze existing CSVs
+```
+
+## Scope: GM ↔ L1 only
+
+The level **above** the L0 chooser stages operands GM→L1 and drains the matmul
+output L0C→GM. That boundary is where "GEMM is memory-bound" actually lives — the
+operands are streamed from HBM with low arithmetic intensity and reloaded once per
+output-tile block. The `l0_tile_study` deliberately treats `GM→L1` (MTE2) as
+out-of-scope noise; **this study makes it the object of study.**
+
+We drive the same `gemm_performance` reference kernel (`RunGemmE2E`) on a **single
+core** (`blockDim=1`, `singleCore = whole problem`) so the AIC pipeline summary
+measures exactly the per-core reload our model scores. Its `TLOAD`s (GM→L1, into a
+`MatTile`) are the operand reload; its `TSTORE`s (L0C→GM) are the FixPipe drain.
+
+## a2a3 cost model
+
+From `include/pto/costmodel/arch_config.hpp` (`BandwidthTable`, flat/legacy a2a3):
+
+| quantity | value |
+| --- | --- |
+| **GM → L1** (MTE2 reload port) | **135 GB/s** — the term our mlsys26 model calls `bw_gm_l1` |
+| L0C → GM (FIXPIPE output store) | 70 GB/s |
+| L1 → L0A / L1 → L0B | 441 / 220.5 GB/s |
+| frequency | 1.85 GHz |
+| MAD (one TMATMUL) | `6 + cpr·⌈m/16⌉·⌈k/kt⌉·⌈n/16⌉`, `kt=32/bytes_a`, `cpr=2 fp32 / 1 bf16` |
+| transfer cycles | `bytes / 2³⁰ / bw[GiB/s] · freq` |
+
+A TLOAD into a `MatTile` resolves to `PipeKey::GM_TO_L1` and is charged at the
+**flat** table value (`formula_backend_transfer.hpp`), *not* the env-gated fitted
+Hill model. The fitted on-device GM→L1 saturates at **28.61 GiB/s** (≈4.7× below
+flat) — a gap quantified in `DESIGN_SPACE.md`, relevant because our mlsys26 model
+hardcodes the flat 135.
+
+## The model term validated here
+
+Our mlsys26 `cube_operand_reload`, for one matmul `C[M,N] += A[M,K]·B[K,N]` with an
+output tile `(h=baseM, w=baseN)`:
+
+```
+reload = M·N·K / w · bytes_a    # A panel reloaded once per N-block (N/w times)
+       + M·N·K / h · bytes_b    # B panel reloaded once per M-block (M/h times)
+```
+
+This is **exactly** the GM→L1 byte volume `RunGemmE2E` issues: A is `TLOAD`ed for
+every `(i,j,kIter)` (no cross-`j` residency → reloaded `N/baseN` times), B likewise
+reloaded `M/baseM` times. The K-staging knobs `stepKa/stepKb` only batch the TLOADs
+into bigger L1 panels — they do **not** change the total bytes.
+
+## Experiments & findings
+
+| experiment | validates | result |
+| --- | --- | --- |
+| **gml1_reload** | reload byte formula + GM→L1 bandwidth (sweep `(baseM,baseN)`) | MTE2 cycles match `reload/135` to **0.3% mean error** over 24 tiles (3→32 MiB); effective BW **135.4 GiB/s**, spread 0.5% |
+| **gml1_roofline** | `total == max(mte2,mte1,cube,fixp)` (overlap, not sum) across regimes | `t/max ≈ 1.00–1.06`, `t/sum ≈ 0.45` for 4/5 regimes → pipes overlap, feed/drain are separate |
+| **gml1_stepk** | MTE2 invariant to K-staging depth | mte2 **exactly** flat across `stepK∈{1,2,4}` → model correctly omits a stepK term |
+
+### The one regime where `max` is optimistic
+
+`skinny_membound` (1024×1024×128, large output / tiny K) gives `t/max = 1.30`:
+here `mte2 ≈ fixp` (both ≈53k cycles) and the **single-buffered L0C** (`dbC=1` in
+`RunGemmE2E`) exposes the output drain — the store cannot hide under the tiny
+2-iteration K-loop. The GM-read feed and GM-write drain then partially serialize.
+This is the same drain-exposure the `l0_tile_study` `dbc` experiment found
+(`depthC=2` wins 13–37% when drain-bound), and it marks the regime where our
+`ddrS = max(feed, writes)` simplification is most optimistic. See `DESIGN_SPACE.md`.
+
+## Files
+
+- `common.py` — a2a3 constants, the `reload_bytes`/`transfer_cycles`/`mad_cycles`
+  model, the perf-sim CSV reader, and the `RunGemmE2E` single-core emitter.
+- `experiments.py` — testcase generators (also listed in `../testcase/CMakeLists.txt`).
+- `analyze.py` — reads the CSVs, scores each prediction.
+- `run.py` — generate → build → run → analyze.
+- `DESIGN_SPACE.md` — the GM↔L1 design space and the mlsys26 model cross-check.
