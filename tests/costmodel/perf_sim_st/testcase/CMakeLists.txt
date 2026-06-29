@@ -45,6 +45,7 @@ set(ALL_TESTCASES
     gml1_chain
     gml1_fused
     gml1_multicore
+    gml1_decision
     conv2d_perf_sim
     topk_perf_sim
     fa_perf_sim

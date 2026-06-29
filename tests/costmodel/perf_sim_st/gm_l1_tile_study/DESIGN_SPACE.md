@@ -51,6 +51,7 @@ takes the `max` over the DDR and compute pipes.
 | chained matmul: intermediate C **excluded** from GM reload | `gml1_chain` | per-term error ≤0.1%; C round-trip = mm1 store + mm2 C-reload; fusion saves 23→30% as Ki grows |
 | truly fused lowering (C resident in L1) hits the fused number | `gml1_fused` | `fused mte2 = reload(A,B,D)` to −0.0% (1–4 M-bands); C never TLOAD'd from GM; 40–44% reload saving |
 | multi-core `par(active,peak) = min(active, HBM/peak)` | `gml1_multicore` | uncapped `mte2·B` constant (linear); capped per-core bw = `min(135,900/B)` ≤0.4%; aggregate saturates at HBM past the knee |
+| decision quality: model argmin tile == sim-best tile | `gml1_decision` | GM→L1-only roofline 4.1% mean regret (ties transposes); + MTE1 tiebreaker → 0.0% |
 
 ### Where `max(feed, writes)` is optimistic [M]
 
@@ -147,7 +148,30 @@ Implication for mlsys26: `bw_gm_l1 = 135` is ~5× optimistic versus the on-devic
 and a single-number calibration understates fine-tile reload. If reload accuracy
 matters, adopt the Hill form (`peak=28.61, k=1107`) keyed on per-TLOAD bytes rather
 than re-fitting one flat constant. (The fitted Hill curve is also where the multi-core
-`par()` aggregate would bind — a future multi-core experiment.)
+`par()` aggregate would bind.)
+
+## Decision quality — does the model PICK the right tile? [M] (`gml1_decision`)
+
+Accurate costs are necessary but not sufficient; what matters is the **argmin**. Sweeping
+the full `(bm,bn)` grid for four problems and comparing the model's chosen tile to the
+sim's measured-best:
+
+- The GM→L1 reload+store terms are **port-symmetric** (`MNK/w·bₐ + MNK/h·b_b`, plus the
+  shape-only store), so they tie transposed tiles **exactly** — and for square problems the
+  cube term ties too. The tiebreak then loses **1–6%** (mean 4.1%): the sim prefers the
+  **tall** tile `(256,128)` over the wide `(128,256)`.
+- Why tall wins: the **MTE1 (L1→L0) ports are asymmetric** (L0A 441, L0B 220.5 GiB/s). B
+  streams through the slow L0B port and re-extracts with M-tiling (`1/bm`), so a tall tile
+  (big `bm`) cuts the slow-port traffic. This is the `l0_tile_study` term, invisible to the
+  GM→L1 roofline.
+- Crucially, MTE1 **cannot** enter as another `max` term: `feed` dominates, so `max(feed,
+  …, mte1)` still ties. It has to be a **tiebreaker** — rank by `(max_wall, mte1)`. With it,
+  the model picks the sim-best tile every time → **0.0% regret**.
+
+Takeaway: a GM→L1-only tile chooser is ~4% suboptimal on aspect; the cube tile decision
+needs the L0-level MTE1 term as a tiebreaker (or a full overlap-aware 4-pipe wall). The
+residual (~10–24% `total/max` on the chosen tile) is the unmodeled `dbC=1` drain
+serialization — the same corner `gml1_roofline` flagged.
 
 ## Caveats
 

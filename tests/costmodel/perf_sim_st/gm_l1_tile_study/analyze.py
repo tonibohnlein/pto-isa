@@ -182,6 +182,49 @@ def analyze_fused():
     print("     A once -- exactly the model's reload factors; fusion removes the whole C round-trip.")
 
 
+# -------------------------------------------------------------------------- decision
+def analyze_decision():
+    print("\n=== decision: does the model's argmin tile match the sim's best tile? ===")
+    rows = _index("decision")
+    by_label = {}
+    for x in rows:
+        by_label.setdefault(x["label"], []).append(x)
+    # Two rankers: the GM->L1 roofline alone (max feed,writes,cube), and the same with an
+    # MTE1 TIEBREAKER -- (max_wall, mte1) lexicographic. MTE1 can't enter as another max
+    # term (feed dominates, so max() hides it); it must break ties among reload-equal tiles.
+    print(f"  {'problem':>15} {'n':>3} | {'sim_best':>9} | {'GM->L1 only':>11} {'reg':>5} | "
+          f"{'+MTE1 tiebrk':>12} {'reg':>5}")
+    reg_gml1, reg_full = [], []
+    for label in ("reload_512", "balanced_1k", "deepk_2k", "skinny_bigout"):
+        recs = []
+        for x in by_label.get(label, []):
+            d = C.read_aic(x["id"])
+            feed = C.transfer_cycles(C.reload_bytes(x["M"], x["N"], x["K"], x["bm"], x["bn"]), C.BW_GM_L1)
+            writes = C.transfer_cycles(C.store_bytes(x["M"], x["N"]), C.BW_L0C_GM)
+            cube = C.cube_cycles(x["M"], x["N"], x["K"], x["bm"], x["bk"], x["bn"])
+            mte1 = C.mte1_cycles(x["M"], x["N"], x["K"], x["bm"], x["bk"], x["bn"])
+            recs.append(dict(tile=(x["bm"], x["bn"]), sim=d["total"],
+                             gml1=max(feed, writes, cube), mte1=mte1))
+        if not recs:
+            continue
+        sb = min(recs, key=lambda r: r["sim"])
+        mb_g = min(recs, key=lambda r: r["gml1"])                       # pure roofline (ties)
+        mb_f = min(recs, key=lambda r: (r["gml1"], r["mte1"]))          # + MTE1 tiebreaker
+        rg = mb_g["sim"] / sb["sim"] - 1.0
+        rf = mb_f["sim"] / sb["sim"] - 1.0
+        reg_gml1.append(rg)
+        reg_full.append(rf)
+        print(f"  {label:>15} {len(recs):>3} | {str(sb['tile']):>9} | {str(mb_g['tile']):>11} "
+              f"{rg * 100:>4.1f}% | {str(mb_f['tile']):>12} {rf * 100:>4.1f}%")
+    print(f"  mean regret: GM->L1-only {sum(reg_gml1) / len(reg_gml1) * 100:.1f}% "
+          f"(max {max(reg_gml1) * 100:.1f}%)  ->  +MTE1 tiebreaker "
+          f"{sum(reg_full) / len(reg_full) * 100:.1f}% (max {max(reg_full) * 100:.1f}%)")
+    print("  -> GM->L1 reload+store are port-SYMMETRIC, so they tie transposed tiles EXACTLY; the")
+    print("     tiebreak loses 1-6% because the sim prefers TALL tiles (cheaper on the slow L0B/MTE1")
+    print("     port). MTE1 can't fix this as another max term (feed dominates) -- it must break the")
+    print("     tie. With the MTE1 tiebreaker the model picks the sim-best tile (~0 regret).")
+
+
 # ------------------------------------------------------------------------- multicore
 def analyze_multicore():
     print("\n=== multicore: par(active, peak) = min(active, HBM/peak) via the Hill aggregate cap ===")
@@ -252,4 +295,5 @@ ALL = {
     "gml1_chain": analyze_chain,
     "gml1_fused": analyze_fused,
     "gml1_multicore": analyze_multicore,
+    "gml1_decision": analyze_decision,
 }

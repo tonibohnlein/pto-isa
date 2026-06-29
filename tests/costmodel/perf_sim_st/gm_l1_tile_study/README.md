@@ -75,6 +75,7 @@ into bigger L1 panels — they do **not** change the total bytes.
 | **gml1_chain** | chained `C=A·B`, `E=C·D` by **decomposition**: intermediate C excluded from GM reload | per-term error **≤0.1%**; the C round-trip (mm1 store + mm2 C-reload) is exactly what fusion drops — **23→30% saving** as Ki grows |
 | **gml1_fused** | a **truly fused** `RunGemmChain` kernel (C resident in L1), 1–4 M row-bands | `fused mte2 = reload(A,B,D)` to **−0.0%** — C never TLOAD'd from GM; B,D reloaded per band; **40–44% reload saving** |
 | **gml1_multicore** | `par(active,peak)=min(active,HBM/peak)` via the Hill aggregate cap | uncapped `mte2·B` constant (linear); capped per-core bw = `min(135,900/B)` to ≤0.4%; aggregate saturates at 900 GiB/s past the 6.7-core knee |
+| **gml1_decision** | does the model's argmin tile match the sim's best tile? (regret) | GM→L1-only roofline ties transposes → **4.1% mean regret**; an **MTE1 tiebreaker** (prefer tall tiles) → **0.0% regret** |
 
 ### The one regime where `max` is optimistic
 

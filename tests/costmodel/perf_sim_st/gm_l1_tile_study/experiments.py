@@ -222,6 +222,37 @@ def gen_multicore():
     return _save_index("multicore", index)
 
 
+# -------------------------------------------------------------------------- decision
+# Decision quality: not "are the costs accurate" but "does the model PICK the right tile".
+# For several problems spanning regimes, sweep the full (bm,bn) tile grid; the analyzer
+# compares the model's argmin (max(feed, writes, cube) -- the mlsys26 cube roofline) to the
+# sim's measured-best tile, and reports REGRET = how much slower the model's pick is than
+# the true optimum. Skinny/large-output problems also expose the dbC=1 drain serialization
+# the max-roofline doesn't model -- the regime where decisions can go wrong.
+def gen_decision():
+    problems = [  # (label, M, N, K) -- reload-bound, balanced, compute-ish, skinny large-output
+        ("reload_512", 512, 512, 512),
+        ("balanced_1k", 512, 512, 1024),
+        ("deepk_2k", 256, 256, 2048),
+        ("skinny_bigout", 1024, 1024, 128),
+    ]
+    bk = 64
+    defs, fids, index = [], [], []
+    n = 0
+    for (label, M, N, K) in problems:
+        for bm in C.divisors(M):
+            for bn in C.divisors(N):
+                if not _fits(bm, bk, bn) or K % bk:
+                    continue
+                fid = f"dc{n}"
+                defs.append(C.emit_e2e(fid, M, K, N, bm, bk, bn))
+                fids.append(fid)
+                index.append(dict(id=fid, label=label, M=M, N=N, K=K, bm=bm, bk=bk, bn=bn))
+                n += 1
+    C.write_testcase("gml1_decision", "gemm_performance_kernel.cpp", defs, fids, "Gml1Decision")
+    return _save_index("decision", index)
+
+
 ALL = {
     "gml1_reload": gen_reload,
     "gml1_roofline": gen_roofline,
@@ -230,4 +261,5 @@ ALL = {
     "gml1_chain": gen_chain,
     "gml1_fused": gen_fused,
     "gml1_multicore": gen_multicore,
+    "gml1_decision": gen_decision,
 }

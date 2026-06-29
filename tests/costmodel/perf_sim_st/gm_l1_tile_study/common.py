@@ -141,6 +141,17 @@ def cube_cycles(M, N, K, bm, bk, bn, bytes_a=2):
     return (M // bm) * (N // bn) * (K // bk) * mad_cycles(bm, bk, bn, bytes_a)
 
 
+def mte1_cycles(M, N, K, bm, bk, bn, bytes_a=2, bytes_b=2):
+    """L1->L0 extract cost (the cube's MTE1 pipe): A streams through L0A (BW 441), B
+    through L0B (BW 220.5). A re-extracts with N-tiling (1/bn), B with M-tiling (1/bm) --
+    so the port ASYMMETRY makes tall tiles (big bm) cheaper: the slow L0B port carries B,
+    and big bm cuts B re-extracts. This is the L0-study term the GM->L1 roofline omits.
+    """
+    a = transfer_cycles(M * N * K * bytes_a / bn, BW_L1_L0A)
+    b = transfer_cycles(M * N * K * bytes_b / bm, BW_L1_L0B)
+    return a + b
+
+
 def read_aic(fid, csv_dir=None):
     """Return the AIC-row pipe busy cycles for kernel function `fid`.
 
