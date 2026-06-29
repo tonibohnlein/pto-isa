@@ -41,6 +41,7 @@ set(ALL_TESTCASES
     gml1_reload
     gml1_roofline
     gml1_stepk
+    gml1_splitk
     conv2d_perf_sim
     topk_perf_sim
     fa_perf_sim

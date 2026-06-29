@@ -69,6 +69,7 @@ into bigger L1 panels — they do **not** change the total bytes.
 | **gml1_reload** | reload byte formula + GM→L1 bandwidth (sweep `(baseM,baseN)`) | MTE2 cycles match `reload/135` to **0.3% mean error** over 24 tiles (3→32 MiB); effective BW **135.4 GiB/s**, spread 0.5% |
 | **gml1_roofline** | `total == max(mte2,mte1,cube,fixp)` (overlap, not sum) across regimes | `t/max ≈ 1.00–1.06`, `t/sum ≈ 0.45` for 4/5 regimes → pipes overlap, feed/drain are separate |
 | **gml1_stepk** | MTE2 invariant to K-staging depth | mte2 **exactly** flat across `stepK∈{1,2,4}` → model correctly omits a stepK term |
+| **gml1_splitk** | split-K sink: feed/compute `~ Kc=K/S`, output store a constant floor | `mte2/Kc` flat (104.5), `cube ∝ Kc`, `fixp` 0.0% spread; bound flips MTE2→FIXP at the knee — validates `eval_S` |
 
 ### The one regime where `max` is optimistic
 
@@ -79,6 +80,15 @@ here `mte2 ≈ fixp` (both ≈53k cycles) and the **single-buffered L0C** (`dbC=
 This is the same drain-exposure the `l0_tile_study` `dbc` experiment found
 (`depthC=2` wins 13–37% when drain-bound), and it marks the regime where our
 `ddrS = max(feed, writes)` simplification is most optimistic. See `DESIGN_SPACE.md`.
+
+### The output store drains as bf16
+
+`gml1_splitk` pins the FixPipe store cost: `fixp = M·N·2 / BW_L0C_GM` to +0.1%
+(512² and 1024²). The FixPipe drains the **fp32** L0C accumulator to GM as a
+**2-byte (bf16)** write at 70 GiB/s — so `out_store`'s width is the **output (drain)
+dtype**, not the 4-byte accumulator. mlsys26's `out_store` uses
+`dtype_bytes(output tensor)`, which is correct iff that output is bf16; an
+fp32-output matmul would be charged 2× the sim's store floor.
 
 ## Files
 

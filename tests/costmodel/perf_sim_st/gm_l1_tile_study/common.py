@@ -66,8 +66,15 @@ def reload_bytes(M, N, K, bm, bn, bytes_a=2, bytes_b=2):
     return M * N * K / bn * bytes_a + M * N * K / bm * bytes_b
 
 
-def store_bytes(M, N, bytes_c=4):
-    """L0C->GM matmul output store (the FixPipe drain), shape-only."""
+def store_bytes(M, N, bytes_c=2):
+    """L0C->GM matmul output store (the FixPipe drain), shape-only.
+
+    NOTE: the perf-sim's copy_matrix_cc_to_gm charges L0C_TO_GM (70 GiB/s) on a
+    *2-byte* (bf16) drain even though the L0C accumulator is fp32 -- the FixPipe
+    casts fp32->bf16 on the way out. So the drain width is the OUTPUT dtype (2 B),
+    not the accumulator (4 B). Measured: fixp = M*N*2/70 to <0.1% (512^2 and 1024^2).
+    mlsys26's out_store uses dtype_bytes(output tensor) -- correct iff that dtype is bf16.
+    """
     return M * N * bytes_c
 
 

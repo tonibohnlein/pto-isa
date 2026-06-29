@@ -25,7 +25,7 @@ For a single matmul, one core, output tile `(h, w)`:
 
 ```
 reload  = M·N·K/w · bytes_a  +  M·N·K/h · bytes_b      # GM→L1 (MTE2), the dominant term
-store   = M·N · bytes_c                                 # L0C→GM (FixPipe drain), shape-only
+store   = M·N · bytes_c   (bytes_c = OUTPUT dtype, 2 B) # L0C→GM (FixPipe drain), shape-only
 feed    = reload / BW_GM_L1                             # cycles
 writes  = store  / BW_L0C_GM                            # cycles
 ddr     = max(feed, writes)        # GM-read and GM-write are SEPARATE concurrent pipes
@@ -46,16 +46,36 @@ takes the `max` over the DDR and compute pipes.
 | `wall = max(pipes)` (overlap, not sum) | `gml1_roofline` | `t/max≈1.0`, `t/sum≈0.45` (4/5 regimes) |
 | feed (GM→L1) ∥ drain (L0C→GM) → `max`, not `+` | `gml1_roofline` | confirmed by `t/sum≈0.5` |
 | reload bytes independent of `stepK` | `gml1_stepk` | mte2 **exactly** flat across stepK∈{1,2,4} |
+| split-K: feed/compute `~ Kc`, store a constant floor | `gml1_splitk` | `mte2/Kc` flat (104.5), `cube ∝ Kc`, `fixp` 0.0% spread; bound flips MTE2→FIXP at the knee |
+| output store width = **output dtype (2 B)**, not 4-B accumulator | `gml1_splitk` | `fixp = M·N·2/70` to +0.1% (512² and 1024²) |
 
 ### Where `max(feed, writes)` is optimistic [M]
 
 `skinny_membound` (1024×1024×128, large output / tiny K): `mte2≈fixp` both saturate,
-`dbC=1` exposes the drain (the 2-iteration K-loop can't hide a 4 MiB store), and the
+`dbC=1` exposes the drain (the 2-iteration K-loop can't hide a 2 MiB bf16 store), and the
 GM-read/GM-write pipes partially serialize → `total ≈ 1.3·max`. The `max(feed,
 writes)` form assumes the drain fully overlaps the feed; that holds whenever **either**
 compute hides the drain (deep K) **or** `dbC=2`. In the exposed corner it is
 optimistic by ~30%. This is the GM↔L1 image of the `l0_tile_study` `dbc` result
 (`depthC=2` wins 13–37% when drain-bound) — the same lowering knob (`dbC`) governs it.
+
+### Split-K (sink): the store floor that bounds the split (`gml1_splitk`)
+
+A parallel split-K **sink** launches `S` workers, each computing a full `M×N` partial
+over a `K/S` slice and atomic-adding it to GM. Per worker: `feed`/`compute ∝ Kc=K/S`,
+but the output `store` is a **constant** `M·N·2/BW_L0C_GM` floor (independent of `Kc`).
+Measured: `mte2/Kc` flat at 104.5, `cube` halves with `Kc`, `fixp` constant (0.0%
+spread). So the per-core wall shrinks with `S` only while feed-bound, then plateaus at
+the store floor (bound flips MTE2→FIXP at the knee). This is exactly what the mlsys26
+`eval_S` enumeration trades off — `ddrS = max(feed, S·writes)` with `writes` the
+constant store. The **upward** re-inflation at large `S` (aggregate `S·store`
+saturating HBM via `par()`) is multi-core and not single-core visible here.
+
+The store-width subtlety: the FixPipe drains the **fp32** L0C accumulator to GM as a
+**2-byte (bf16)** write at `BW_L0C_GM=70` (`fixp = M·N·2/70`, verified to +0.1% at
+512² and 1024²). So `out_store`'s `bytes_c` is the **output (drain) dtype**, not the
+4-byte accumulator. mlsys26 uses `dtype_bytes(output tensor)` — correct iff that output
+is bf16; an fp32-output matmul would be charged 2× the sim's store floor.
 
 ## Multi-core (the `par` cap)
 
@@ -86,9 +106,9 @@ experiment under `PTO_BW_MODE=fitted` and re-fit `eff_GiB/s`).
 
 ## Caveats
 
-- Single matmul, single core, output-stationary (`RunGemmE2E`'s only mode). Chained
-  matmuls and split-K **sink** reduction (the mlsys26 `eval_S` enumeration) are not
-  yet exercised — a natural next experiment (`gml1_splitk`).
+- Single matmul, single core, output-stationary (`RunGemmE2E`'s only mode). Split-K
+  **sink** reduction is exercised per-worker (`gml1_splitk`); chained matmuls and the
+  multi-core aggregate (`S·store` HBM contention via `par()`) are not yet exercised.
 - The flat-vs-fitted gap is measured indirectly (the default build is flat); a
   `PTO_BW_MODE=fitted` sweep would measure the fitted curve directly.
 - `bytes_a = bytes_b = 2` (bf16) throughout; fp32 operands (`cpr=2`, `kt=8`) change

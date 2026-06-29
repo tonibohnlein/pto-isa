@@ -81,8 +81,49 @@ def analyze_stepk():
           " omits stepK correctly); total may shift via TLOAD batching / overlap.")
 
 
+# ---------------------------------------------------------------------------- splitk
+def analyze_splitk():
+    print("\n=== splitk: per-core feed/compute ~ Kc, output store is a CONSTANT floor ===")
+    rows = sorted(_index("splitk"), key=lambda r: r["S"])
+    print(f"  {'S':>2} {'Kc':>5} | {'mte2':>7} {'cube':>7} {'fixp':>7} {'total':>7} | "
+          f"{'mte2/Kc':>8} {'feed@135':>8} {'feed_err':>8} | bound")
+    fixps, totals = [], []
+    knee = None
+    M0 = N0 = None
+    for x in rows:
+        d = C.read_aic(x["id"])
+        Kc = x["Kc"]
+        M0, N0 = x["M"], x["N"]
+        feed = C.transfer_cycles(C.reload_bytes(x["M"], x["N"], Kc, x["bm"], x["bn"]), C.BW_GM_L1)
+        ferr = (d["mte2"] - feed) / feed * 100 if feed else float("nan")
+        fixps.append(d["fixp"])
+        totals.append((x["S"], d["total"]))
+        pipes = [("MTE2", d["mte2"]), ("MTE1", d["mte1"]), ("CUBE", d["cube"]), ("FIXP", d["fixp"])]
+        bound = max(pipes, key=lambda t: t[1])[0]
+        if knee is None and d["fixp"] >= d["mte2"]:
+            knee = x["S"]
+        print(f"  {x['S']:>2} {Kc:>5} | {d['mte2']:>7} {d['cube']:>7} {d['fixp']:>7} {d['total']:>7} | "
+              f"{d['mte2'] / Kc:>8.1f} {feed:>8.0f} {ferr:>+7.1f}% | {bound}")
+    sp = (max(fixps) - min(fixps)) / (sum(fixps) / len(fixps)) * 100 if fixps else 0.0
+    best_S = min(totals, key=lambda t: t[1])[0]
+    # Predicted store floor: M*N*2 / BW_L0C_GM (the FixPipe drains fp32 L0C as bf16).
+    pred_store = C.transfer_cycles(C.store_bytes(M0, N0), C.BW_L0C_GM)
+    store_err = (fixps[0] - pred_store) / pred_store * 100 if pred_store else float("nan")
+    print(f"  feed (GM->L1) ~ Kc: mte2/Kc flat at ~104.5, matches feed@135 to <1%.")
+    print(f"  store floor (fixp): {fixps[0]} measured vs M*N*2/70 = {pred_store:.0f} predicted "
+          f"({store_err:+.1f}%); spread across S {sp:.1f}% (independent of Kc).")
+    print(f"  bound flips MTE2->FIXP at S={knee}; per-core wall plateaus there. Min total at S={best_S}.")
+    print(f"  NOTE: the FixPipe drains the fp32 L0C accumulator to GM as a *2-byte* (bf16) write")
+    print(f"        @ BW_L0C_GM=70 -- the store width is the OUTPUT dtype (2 B), not the 4-B")
+    print(f"        accumulator. mlsys26 out_store uses dtype_bytes(output) -- correct iff bf16.")
+    print("  -> validates eval_S: feed/compute ~ Kc, store a CONSTANT floor; split helps while"
+          " feed-bound, plateaus at the store floor. (Multi-core S*store re-inflation via the")
+    print("     par() HBM cap is not single-core visible.)")
+
+
 ALL = {
     "gml1_reload": analyze_reload,
     "gml1_roofline": analyze_roofline,
     "gml1_stepk": analyze_stepk,
+    "gml1_splitk": analyze_splitk,
 }

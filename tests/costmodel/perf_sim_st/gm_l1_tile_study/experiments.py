@@ -95,8 +95,38 @@ def gen_stepk():
     return _save_index("stepk", index)
 
 
+# ---------------------------------------------------------------------------- splitk
+# Split-K (sink) as the per-core workload. A parallel split-K sink launches S workers,
+# each computing a FULL M*N partial over a K/S contraction slice, then atomic-adding it
+# to GM. RunGemmE2E with k=Kc=K/S IS one such worker (the atomic-add store has the same
+# L0C->GM byte volume as a plain TSTORE, so the plain store is a faithful proxy).
+# Sweeping Kc shows feed (MTE2) and compute (CUBE) shrink ~ Kc while the output store
+# (FixPipe) is a CONSTANT floor -- exactly the trade-off the mlsys26 eval_S enumeration
+# optimizes: splitting helps until the per-core wall hits that store floor. (The UPWARD
+# re-inflation at large S -- aggregate S*store saturating HBM via par() -- is multi-core
+# and not visible in the single-core AIC row; see DESIGN_SPACE.md.)
+def gen_splitk():
+    M = N = 512
+    K = 1024
+    bm = bn = 128
+    bk = 64
+    assert _fits(bm, bk, bn)
+    defs, fids, index = [], [], []
+    for S in (1, 2, 4, 8, 16):
+        Kc = K // S
+        if Kc < bk or Kc % bk:
+            continue
+        fid = f"sp{S}"
+        defs.append(C.emit_e2e(fid, M, Kc, N, bm, bk, bn))
+        fids.append(fid)
+        index.append(dict(id=fid, M=M, N=N, K=K, S=S, Kc=Kc, bm=bm, bk=bk, bn=bn))
+    C.write_testcase("gml1_splitk", "gemm_performance_kernel.cpp", defs, fids, "Gml1SplitK")
+    return _save_index("splitk", index)
+
+
 ALL = {
     "gml1_reload": gen_reload,
     "gml1_roofline": gen_roofline,
     "gml1_stepk": gen_stepk,
+    "gml1_splitk": gen_splitk,
 }
