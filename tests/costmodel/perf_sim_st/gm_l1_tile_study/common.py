@@ -19,6 +19,7 @@ TESTCASE_DIR = PERF_SIM_ROOT / "testcase"
 KERNEL_INCLUDE = "../../../kernels/manual/a2a3/gemm_performance"  # for CMake include dir
 RESULTS_DIR = STUDY_DIR / "results"
 CSV_DIR = RESULTS_DIR / "perf_sim_output"             # where LAUNCH_KERNEL writes summaries
+CSV_DIR_FITTED = RESULTS_DIR / "fitted" / "perf_sim_output"  # PTO_BW_MODE=fitted run (run.py --fitted)
 
 # --- a2a3 cost-model constants (pto-isa include/pto/costmodel/arch_config.hpp) ---
 # BandwidthTable field order is the source of truth for these (see arch_config.hpp:46).
@@ -87,6 +88,41 @@ def transfer_cycles(byts, bw_gibs):
     return byts / (1024.0 ** 3) / bw_gibs * FREQ_HZ
 
 
+def hill_bw_gibs(byts, peak=BW_GM_L1_FITTED_PEAK, k=BW_GM_L1_FITTED_K):
+    """Fitted Hill GM->L1 bandwidth (GiB/s) for ONE transfer of `byts` bytes:
+    HillBw(B) = peak * B / (k + B). Saturates at `peak`; small B is penalised by `k`.
+    """
+    return peak * byts / (k + byts) if (k + byts) > 0 else peak
+
+
+def fitted_tload_cycles(byts):
+    """Perf-sim MTE2 cycles for ONE GM->L1 TLOAD of `byts` under the fitted Hill model.
+    = (k + byts) * freq / (2**30 * peak) -- a per-transfer FIXED cost (k) + bandwidth term.
+    """
+    if byts <= 0:
+        return 0.0
+    return byts / (1024.0 ** 3) / hill_bw_gibs(byts) * FREQ_HZ
+
+
+def e2e_tloads(M, N, K, bm, bk, bn, stepKa=1, stepKb=1, bytes_a=2, bytes_b=2):
+    """(count, bytes-per-transfer) of the A and B GM->L1 TLOADs RunGemmE2E issues.
+
+    A panel [bm, bk*stepKa] is loaded once per (i,j) every stepKa K-iters; B panel
+    [bk*stepKb, bn] likewise. Total bytes reduce to reload_bytes(); under the FLAT model
+    only the total matters, but under the FITTED Hill model the per-transfer SIZE matters
+    (the `k` floor penalises small TLOADs), so the granularity (tile, stepK) is exposed.
+    """
+    tiles = (M // bm) * (N // bn)
+    a = (tiles * (K // (bk * stepKa)), bm * bk * stepKa * bytes_a)
+    b = (tiles * (K // (bk * stepKb)), bk * stepKb * bn * bytes_b)
+    return [a, b]
+
+
+def fitted_reload_cycles(M, N, K, bm, bk, bn, stepKa=1, stepKb=1):
+    """Predicted MTE2 cycles for RunGemmE2E under PTO_BW_MODE=fitted (sum over TLOADs)."""
+    return sum(cnt * fitted_tload_cycles(b) for cnt, b in e2e_tloads(M, N, K, bm, bk, bn, stepKa, stepKb))
+
+
 def mad_cycles(m, k, n, bytes_a=2):
     """Cube MAD cost (pto-isa formula_backend_compute.hpp): one TMATMUL call."""
     kt = 32 // bytes_a            # 16 (bf16) / 8 (fp32)
@@ -99,9 +135,12 @@ def cube_cycles(M, N, K, bm, bk, bn, bytes_a=2):
     return (M // bm) * (N // bn) * (K // bk) * mad_cycles(bm, bk, bn, bytes_a)
 
 
-def read_aic(fid):
-    """Return the AIC-row pipe busy cycles for kernel function `fid`."""
-    p = CSV_DIR / f"{fid}_pipeline_summary.csv"
+def read_aic(fid, csv_dir=None):
+    """Return the AIC-row pipe busy cycles for kernel function `fid`.
+
+    csv_dir defaults to the flat-model CSV_DIR; pass CSV_DIR_FITTED for the fitted run.
+    """
+    p = (csv_dir or CSV_DIR) / f"{fid}_pipeline_summary.csv"
     with p.open() as f:
         for r in csv.DictReader(f):
             if r["unit"] == "AIC":

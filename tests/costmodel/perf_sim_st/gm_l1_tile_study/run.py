@@ -14,6 +14,7 @@
 # experiments.py must be registered in ../testcase/CMakeLists.txt (ALL_TESTCASES).
 
 import argparse
+import os
 import pathlib
 import subprocess
 import sys
@@ -26,9 +27,9 @@ REPO_ROOT = C.PERF_SIM_ROOT.parents[2]
 DEFAULT_BUILD = C.STUDY_DIR / "build"
 
 
-def sh(cmd, cwd=None):
+def sh(cmd, cwd=None, env=None):
     print(f"  $ {' '.join(str(c) for c in cmd)}")
-    subprocess.run(cmd, cwd=cwd, check=True)
+    subprocess.run(cmd, cwd=cwd, check=True, env=env)
 
 
 def ensure_formula_headers():
@@ -54,6 +55,8 @@ def main():
     ap.add_argument("experiments", nargs="*", default=[], help="subset (default: all)")
     ap.add_argument("--build-dir", default=str(DEFAULT_BUILD))
     ap.add_argument("--no-build", action="store_true", help="skip build/run; analyze existing CSVs")
+    ap.add_argument("--fitted", action="store_true",
+                    help="also run binaries under PTO_BW_MODE=fitted and analyze the Hill GM->L1 model")
     args = ap.parse_args()
 
     names = args.experiments or list(experiments.ALL)
@@ -75,10 +78,18 @@ def main():
         print("== run (CSVs -> results/perf_sim_output) ==")
         for name in names:
             sh([str(build_dir / "bin" / name)], cwd=C.RESULTS_DIR)
+        if args.fitted:
+            print("== run fitted (PTO_BW_MODE=fitted, CSVs -> results/fitted/perf_sim_output) ==")
+            fitted_cwd = C.RESULTS_DIR / "fitted"
+            (fitted_cwd / "perf_sim_output").mkdir(parents=True, exist_ok=True)
+            for name in names:
+                sh([str(build_dir / "bin" / name)], cwd=fitted_cwd, env={**os.environ, "PTO_BW_MODE": "fitted"})
 
     print("== analyze ==")
     for name in names:
         analyze.ALL[name]()
+    if args.fitted:
+        analyze.analyze_fitted()
 
 
 if __name__ == "__main__":

@@ -163,3 +163,37 @@ ALL = {
     "gml1_splitk": analyze_splitk,
     "gml1_chain": analyze_chain,
 }
+
+
+# ---------------------------------------------------------------------------- fitted
+# Cross-mode analysis (run.py --fitted): compare flat (135 GiB/s) vs the on-device
+# fitted Hill GM->L1 model, and validate the per-TLOAD Hill prediction. Reads the
+# reload experiment's flat CSVs (CSV_DIR) and fitted CSVs (CSV_DIR_FITTED).
+def analyze_fitted():
+    print("\n=== fitted: PTO_BW_MODE=fitted GM->L1 Hill model vs flat 135 GiB/s ===")
+    rows = sorted(_index("reload"), key=lambda r: (r["bm"], r["bn"]))
+    print(f"  {'tile':>9} {'A/B TLOAD B':>12} | {'flat_mte2':>9} {'fit_mte2':>9} {'slow':>5} | "
+          f"{'pred_fit':>9} {'err%':>6} {'eff_GiB/s':>9}")
+    errs, slows = [], []
+    for x in rows:
+        M, N, K, bm, bk, bn = x["M"], x["N"], x["K"], x["bm"], x["bk"], x["bn"]
+        flat = C.read_aic(x["id"])
+        fit = C.read_aic(x["id"], C.CSV_DIR_FITTED)
+        (_, ab), (_, bb) = C.e2e_tloads(M, N, K, bm, bk, bn)   # A,B per-transfer bytes
+        pred = C.fitted_reload_cycles(M, N, K, bm, bk, bn)
+        err = (fit["mte2"] - pred) / pred * 100 if pred else float("nan")
+        slow = fit["mte2"] / flat["mte2"] if flat["mte2"] else float("nan")
+        eff = _eff_bw_gibs(C.reload_bytes(M, N, K, bm, bn), fit["mte2"])
+        errs.append(abs(err))
+        slows.append(slow)
+        print(f"  {f'{bm}x{bn}':>9} {f'{ab}/{bb}':>12} | {flat['mte2']:>9} {fit['mte2']:>9} "
+              f"{slow:>4.1f}x | {pred:>9.0f} {err:>+5.1f}% {eff:>9.1f}")
+    mean_slow = sum(slows) / len(slows)
+    print(f"  Hill per-TLOAD prediction: mean |err| {sum(errs) / len(errs):.1f}%.")
+    print(f"  fitted is {min(slows):.1f}-{max(slows):.1f}x slower than flat (mean {mean_slow:.1f}x);"
+          f" peak ratio is only {C.BW_GM_L1 / C.BW_GM_L1_FITTED_PEAK:.1f}x -- the excess is the")
+    print(f"  Hill k={C.BW_GM_L1_FITTED_K:.0f}B per-transfer floor penalising small TLOADs.")
+    print("  *** IMPLICATION for mlsys26: bw_gm_l1=135 (flat) is ~5x optimistic vs the on-device")
+    print("      fitted curve, AND fitted reload depends on TLOAD granularity (tile/stepK) -- a")
+    print("      per-transfer effect the flat bytes/bw term cannot express. Calibrating bw_gm_l1")
+    print("      to a single number understates fine-tile reload; consider the Hill form.")

@@ -106,17 +106,29 @@ exercise the cap — but it pins the per-core peak (135) the cap divides. The re
 aggregate HBM (~900 GB/s, pto-isa A3) would bind at `≈6.7` cores for a pure-reload
 matmul; raising the cap was a deliberate choice (see the mlsys26 model notes).
 
-## Flat vs fitted GM→L1 bandwidth [V]
+## Flat vs fitted GM→L1 bandwidth [M] (`run.py --fitted`)
 
-The perf-sim default (and our mlsys26 model) use the **flat** GM→L1 = 135 GiB/s.
-The env-gated **fitted** Hill model (`PTO_BW_MODE=fitted`,
-`MakeFittedHillModel`) uses `HillBw(bytes) = 28.61·bytes/(1107+bytes)` — saturating
-at **28.61 GiB/s**, ~4.7× below flat, "fixing GM_TO_L1's systematic 0.70× low bias
-of the mixed fit" (arch_config.hpp comment). Implication for mlsys26: a reload-bound
-matmul costed at the flat 135 is **optimistic by up to 4.7×** versus the on-device
-fit. Whether to switch `bw_gm_l1` to the fitted value is a model-calibration
-decision — out of scope here, but this study is the harness to settle it (rerun any
-experiment under `PTO_BW_MODE=fitted` and re-fit `eff_GiB/s`).
+The perf-sim default (and our mlsys26 model) use the **flat** GM→L1 = 135 GiB/s. The
+env-gated **fitted** Hill model (`PTO_BW_MODE=fitted`, `MakeFittedHillModel`) uses
+`HillBw(B) = 28.61·B/(1107+B)` — saturating at **28.61 GiB/s** (~4.7× below flat),
+"fixing GM_TO_L1's 0.70× low bias of the mixed fit" (arch_config.hpp). **The perf-sim
+DOES consult it** — re-running the reload sweep under `PTO_BW_MODE=fitted` makes MTE2
+**4.9–7.3× slower** (mean 5.4×), and the per-TLOAD Hill prediction `Σ B/HillBw(B)`
+matches to **0.1%**. Two findings:
+
+- **Bigger than the peak ratio.** 4.7× is the *peak* ratio; the measured 5.4× mean
+  (up to 7.3× for 16×16 tiles) is larger because the Hill `k=1107 B` floor penalises
+  **small** transfers: effective GM→L1 rises from 18.7 GiB/s (2 KiB TLOAD) toward the
+  28.61 peak (32 KiB TLOAD).
+- **Granularity-dependent.** Under flat, reload cost = `total_bytes/135` (only total
+  matters). Under fitted it depends on the **TLOAD size** (tile dims, `stepK`) — a
+  per-transfer effect the flat `bytes/bw` term *cannot* express.
+
+Implication for mlsys26: `bw_gm_l1 = 135` is ~5× optimistic versus the on-device fit,
+and a single-number calibration understates fine-tile reload. If reload accuracy
+matters, adopt the Hill form (`peak=28.61, k=1107`) keyed on per-TLOAD bytes rather
+than re-fitting one flat constant. (The fitted Hill curve is also where the multi-core
+`par()` aggregate would bind — a future multi-core experiment.)
 
 ## Caveats
 

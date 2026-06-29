@@ -13,6 +13,7 @@ no NPU required. One command reproduces all of it:
 python run.py            # generate -> build -> run -> analyze, all experiments
 python run.py gml1_reload # a single experiment
 python run.py --no-build  # re-analyze existing CSVs
+python run.py gml1_reload --fitted  # also run PTO_BW_MODE=fitted + Hill analysis
 ```
 
 ## Scope: GM ↔ L1 only
@@ -42,10 +43,11 @@ From `include/pto/costmodel/arch_config.hpp` (`BandwidthTable`, flat/legacy a2a3
 | transfer cycles | `bytes / 2³⁰ / bw[GiB/s] · freq` |
 
 A TLOAD into a `MatTile` resolves to `PipeKey::GM_TO_L1` and is charged at the
-**flat** table value (`formula_backend_transfer.hpp`), *not* the env-gated fitted
-Hill model. The fitted on-device GM→L1 saturates at **28.61 GiB/s** (≈4.7× below
-flat) — a gap quantified in `DESIGN_SPACE.md`, relevant because our mlsys26 model
-hardcodes the flat 135.
+**flat** table value (135) by default. Under `PTO_BW_MODE=fitted` (`run.py --fitted`)
+the perf-sim instead uses the on-device Hill fit `28.61·B/(1107+B)`, which makes MTE2
+**4.9–7.3× slower** (mean 5.4×, Hill per-TLOAD model exact to 0.1%) — bigger than the
+4.7× peak ratio because the `k=1107 B` floor penalises small TLOADs. Our mlsys26 model
+hardcodes the flat 135; the gap and its granularity-dependence are in `DESIGN_SPACE.md`.
 
 ## The model term validated here
 
