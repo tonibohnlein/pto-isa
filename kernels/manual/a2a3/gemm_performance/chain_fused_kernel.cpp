@@ -94,8 +94,11 @@ AICORE inline void Mm2ConsumeC(__gm__ S *D, __gm__ T *E, CMatTile &cMat, DMatTil
     }
 }
 
-// Ki == bk2 == bnC: the whole intermediate C[bm, Ki] is one L0C tile drained to one L1
-// (Mat) tile and consumed as MM2's single left K-slice. Operands bf16, accumulate fp32.
+// Ki == bk2 == bnC: each M row-band's intermediate C[bm, Ki] is one L0C tile drained to
+// one L1 (Mat) tile and consumed as MM2's single left K-slice. The band loop (M/bm) keeps
+// C on-chip per band -- B[K1,Ki] and D[Ki,N2] are reloaded per band (matching the model's
+// M/bm reload factor), A and E are addressed by the band's row offset. M==bm => one band.
+// Operands bf16, accumulate fp32.
 template <typename T, typename U, typename S, int M, int K1, int Ki, int N2, uint32_t bm, uint32_t bk, uint32_t bnE>
 AICORE inline void RunGemmChainFused(__gm__ T *E, __gm__ U *A, __gm__ S *B, __gm__ S *D)
 {
@@ -133,20 +136,26 @@ AICORE inline void RunGemmChainFused(__gm__ T *E, __gm__ U *A, __gm__ S *B, __gm
     TASSIGN(eAcc, 0x0);
     TASSIGN(cAcc, 0x0 + bm * bnE * sizeof(T));
 
-    // MM1: C = A * B, accumulate in L0C.
-    Mm1AccumulateC<U, S, T, M, K1, Ki, bm, bk, TileMatA, TileMatB, LeftTile, RightTile, CAccTile>(
-        A, B, aMat, bMat, aL0, bL0, cAcc);
+    constexpr uint32_t mLoop = M / bm;
+    for (uint32_t mi = 0; mi < mLoop; mi++) {
+        __gm__ U *Aband = A + mi * bm * K1;   // A[mi*bm : mi*bm+bm, 0:K1]
+        __gm__ T *Eband = E + mi * bm * N2;   // E[mi*bm : mi*bm+bm, 0:N2]
 
-    // Drain C: L0C -> L1 (TMOV / copy_matrix_cc_to_cbuf, fp32 acc -> bf16). NO GM store.
-    SetFlag<PIPE_M, PIPE_FIX>(1);
-    WaitFlag<PIPE_M, PIPE_FIX>(1);
-    TMOV(cMat, cAcc);
-    SetFlag<PIPE_FIX, PIPE_MTE1>(0);
-    WaitFlag<PIPE_FIX, PIPE_MTE1>(0);
+        // MM1: C[band] = A[band] * B, accumulate in L0C. (B reloaded per band.)
+        Mm1AccumulateC<U, S, T, M, K1, Ki, bm, bk, TileMatA, TileMatB, LeftTile, RightTile, CAccTile>(
+            Aband, B, aMat, bMat, aL0, bL0, cAcc);
 
-    // MM2: E = C * D, C from L1, store E to GM.
-    Mm2ConsumeC<U, S, T, M, Ki, N2, bm, bnE, CMatTile, DMatTile, CLeftTile, DRightTile, AccTile>(
-        D, E, cMat, dMat, cL0, dL0, eAcc);
+        // Drain C: L0C -> L1 (TMOV / copy_matrix_cc_to_cbuf, fp32 acc -> bf16). NO GM store.
+        SetFlag<PIPE_M, PIPE_FIX>(1);
+        WaitFlag<PIPE_M, PIPE_FIX>(1);
+        TMOV(cMat, cAcc);
+        SetFlag<PIPE_FIX, PIPE_MTE1>(0);
+        WaitFlag<PIPE_FIX, PIPE_MTE1>(0);
+
+        // MM2: E[band] = C[band] * D, C from L1, store E[band] to GM. (D reloaded per band.)
+        Mm2ConsumeC<U, S, T, M, Ki, N2, bm, bnE, CMatTile, DMatTile, CLeftTile, DRightTile, AccTile>(
+            D, Eband, cMat, dMat, cL0, dL0, eAcc);
+    }
 }
 
 } // namespace gm_l1_chain

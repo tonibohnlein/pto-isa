@@ -159,13 +159,14 @@ def analyze_chain():
 # ----------------------------------------------------------------------------- fused
 def analyze_fused():
     print("\n=== fused: truly fused chain -- intermediate C never round-trips GM ===")
-    rows = sorted(_index("fused"), key=lambda r: (r["K1"], r["Ki"]))
-    print(f"  {'M,K1,Ki,N2':>17} | {'fz.mte2':>8} {'pred(ABD)':>9} {'err%':>6} | "
-          f"{'unfused':>8} {'C saved':>8} {'save%':>6} | {'fz.fixp':>8}")
+    rows = sorted(_index("fused"), key=lambda r: (r["M"], r["K1"], r["Ki"]))
+    print(f"  {'M,K1,Ki,N2':>17} {'bands':>5} | {'fz.mte2':>8} {'pred(ABD)':>9} {'err%':>6} | "
+          f"{'unfused':>8} {'C saved':>8} {'save%':>6}")
     for x in rows:
         M, K1, Ki, N2, bm = x["M"], x["K1"], x["Ki"], x["N2"], x["bm"]
         fz, u1, u2 = C.read_aic(x["fused"]), C.read_aic(x["mm1"]), C.read_aic(x["mm2"])
-        # Model fused reload = MM1 (A+B) + MM2 rhs-only (D); C is `produced`, excluded.
+        # Model fused reload = MM1 (A + B reloaded M/bm bands) + MM2 D-only (also M/bm); C
+        # is `produced`, excluded. reload_bytes' /bm factor already gives the per-band reload.
         ab = C.reload_bytes(M, Ki, K1, bm, Ki)         # MM1 output C[M,Ki], width w = Ki
         d_only = M * N2 * Ki / bm * 2                  # D reload (rhs -> /h = /bm), bf16
         pred = C.transfer_cycles(ab + d_only, C.BW_GM_L1)
@@ -174,11 +175,39 @@ def analyze_fused():
         saved = unfused - fz["mte2"]
         save = saved / unfused * 100 if unfused else 0.0
         tag = f"{M},{K1},{Ki},{N2}"
-        print(f"  {tag:>17} | {fz['mte2']:>8} {pred:>9.0f} {err:>+5.1f}% | "
-              f"{unfused:>8} {saved:>8} {save:>5.1f}% | {fz['fixp']:>8}")
-    print("  -> fused MTE2 matches reload(A,B,D): the intermediate C is NEVER loaded from GM")
-    print("     (TMOV drains it L0C->L1, MM2 TEXTRACTs it from L1). vs the unfused two-matmul")
-    print("     baseline, fusion removes the whole C round-trip -- the produced-exclusion, live.")
+        print(f"  {tag:>17} {M // bm:>5} | {fz['mte2']:>8} {pred:>9.0f} {err:>+5.1f}% | "
+              f"{unfused:>8} {saved:>8} {save:>5.1f}%")
+    print("  -> fused MTE2 matches reload(A,B,D) at 1..4 bands: C is NEVER loaded from GM (TMOV")
+    print("     drains it L0C->L1, MM2 TEXTRACTs from L1). B,D are reloaded per M-band (M/bm),")
+    print("     A once -- exactly the model's reload factors; fusion removes the whole C round-trip.")
+
+
+# ------------------------------------------------------------------------- multicore
+def analyze_multicore():
+    print("\n=== multicore: par(active, peak) = min(active, HBM/peak) via the Hill aggregate cap ===")
+    rows = sorted(_index("multicore"), key=lambda r: r["B"])
+    M, N, K, bm, bn, hbm = (rows[0][k] for k in ("M", "N", "K", "bm", "bn", "hbm"))
+    peak = C.BW_GM_L1
+    total = C.reload_bytes(M, N, K, bm, bn)        # whole-problem reload bytes
+    knee = hbm / peak
+    print(f"  HBM={hbm:.0f} GiB/s, per-core peak={peak:.0f} -> par saturates at {knee:.1f} cores")
+    print(f"  {'B':>3} | {'uncap.mte2':>10} {'un*B':>10} | {'cap.mte2':>9} {'pred_cap':>9} {'err%':>6} "
+          f"{'pc_bw':>6} {'aggr':>7}")
+    for x in rows:
+        B = x["B"]
+        un, cp = C.read_aic(x["un"]), C.read_aic(x["cap"])
+        pcb = C.reload_bytes(M, N // B, K, bm, bn)         # per-core reload bytes (= total/B)
+        pc_bw = min(peak, hbm / B)                         # par(): per-core effective BW
+        pred_cap = C.transfer_cycles(pcb, pc_bw)
+        err = (cp["mte2"] - pred_cap) / pred_cap * 100 if pred_cap else float("nan")
+        eff_pc = _eff_bw_gibs(pcb, cp["mte2"])
+        aggr = total / (1024.0 ** 3) / (cp["mte2"] / C.FREQ_HZ) if cp["mte2"] else float("nan")
+        print(f"  {B:>3} | {un['mte2']:>10} {un['mte2'] * B:>10} | {cp['mte2']:>9} {pred_cap:>9.0f} "
+              f"{err:>+5.1f}% {eff_pc:>6.1f} {aggr:>7.0f}")
+    print(f"  -> uncapped: un.mte2 * B ~ constant = linear scaling, no contention =")
+    print(f"     par=active (mlsys26's disabled 3240 cap). capped: per-core bw = min({peak:.0f},"
+          f" {hbm:.0f}/B);")
+    print(f"     aggregate saturates at HBM={hbm:.0f} for B > {knee:.1f} -- the par() cap, validated.")
 
 
 # ---------------------------------------------------------------------------- fitted
@@ -222,4 +251,5 @@ ALL = {
     "gml1_splitk": analyze_splitk,
     "gml1_chain": analyze_chain,
     "gml1_fused": analyze_fused,
+    "gml1_multicore": analyze_multicore,
 }

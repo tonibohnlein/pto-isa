@@ -49,7 +49,8 @@ takes the `max` over the DDR and compute pipes.
 | split-K: feed/compute `~ Kc`, store a constant floor | `gml1_splitk` | `mte2/Kc` flat (104.5), `cube ∝ Kc`, `fixp` 0.0% spread; bound flips MTE2→FIXP at the knee |
 | output store width = **output dtype (2 B)**, not 4-B accumulator | `gml1_splitk` | `fixp = M·N·2/70` to +0.1% (512² and 1024²) |
 | chained matmul: intermediate C **excluded** from GM reload | `gml1_chain` | per-term error ≤0.1%; C round-trip = mm1 store + mm2 C-reload; fusion saves 23→30% as Ki grows |
-| truly fused lowering (C resident in L1) hits the fused number | `gml1_fused` | `fused mte2 = reload(A,B,D)` to −0.0%; C never TLOAD'd from GM; 40–44% reload saving |
+| truly fused lowering (C resident in L1) hits the fused number | `gml1_fused` | `fused mte2 = reload(A,B,D)` to −0.0% (1–4 M-bands); C never TLOAD'd from GM; 40–44% reload saving |
+| multi-core `par(active,peak) = min(active, HBM/peak)` | `gml1_multicore` | uncapped `mte2·B` constant (linear); capped per-core bw = `min(135,900/B)` ≤0.4%; aggregate saturates at HBM past the knee |
 
 ### Where `max(feed, writes)` is optimistic [M]
 
@@ -98,7 +99,7 @@ never touches GM. Measured `fused mte2 = reload(A,B,D)` to **−0.0%** (zero C r
 and 40–44% reload saving vs the unfused pair. So the produced-exclusion is not just an
 accounting identity — a realizable lowering hits exactly the number the model scores.
 
-## Multi-core (the `par` cap)
+## Multi-core (the `par` cap) [M] (`gml1_multicore`)
 
 A single core streams at `BW_GM_L1 = 135 GiB/s`. With `n` active cores the mlsys26
 model divides the per-core feed but caps the aggregate at HBM:
@@ -107,11 +108,22 @@ model divides the per-core feed but caps the aggregate at HBM:
 par(active, peak) = min(active, hbm_aggregate_gibps / peak)
 ```
 
-Currently `hbm_aggregate_gibps = 24·135 = 3240` (effectively disabling the cap, so
-`par = active`). The perf-sim AIC row is single-core, so this study does **not**
-exercise the cap — but it pins the per-core peak (135) the cap divides. The realistic
-aggregate HBM (~900 GB/s, pto-isa A3) would bind at `≈6.7` cores for a pure-reload
-matmul; raising the cap was a deliberate choice (see the mlsys26 model notes).
+The perf-sim's Hill model encodes **exactly** this: `BwEff(key, bytes, ncores) =
+min(HillBw(bytes), total_read_gibs / ncores)`, and `LAUNCH_KERNEL` sets `ncores` from
+the launch `block_dim`. Running `gemm_performance` partitioned along N across
+`B ∈ {1,2,4,8,16}` cores, with the per-fid Hill model set to `total_read_gibs = HBM`:
+
+| mode | per-core MTE2 | meaning |
+| --- | --- | --- |
+| **uncapped** (`total_read=0`) | `mte2·B` **constant** (856064) → `~1/B` | linear scaling, no contention = `par = active` |
+| **capped** (`total_read=900`) | per-core bw = `min(135, 900/B)` to ≤0.4% | aggregate saturates at **900 GiB/s** for `B>6.7` |
+
+So the perf-sim default (`total_read=0`) reproduces `par = active` — mlsys26's
+`hbm_aggregate_gibps = 24·135 = 3240` (cap effectively disabled). Enabling the realistic
+A3 cap (~900 GB/s) reproduces `par()` saturation: per-core MTE2 stops shrinking past the
+`≈6.7`-core knee (B=8→16: 128000→128256, flat) because HBM is saturated. This is the
+direct multi-core validation of the mlsys26 `par()` formula — splitting a reload-bound
+matmul across more cores past the knee buys nothing.
 
 ## Flat vs fitted GM→L1 bandwidth [M] (`run.py --fitted`)
 
@@ -139,11 +151,12 @@ than re-fitting one flat constant. (The fitted Hill curve is also where the mult
 
 ## Caveats
 
-- Single core, output-stationary. Split-K **sink** reduction is exercised per-worker
-  (`gml1_splitk`); chained-matmul reload accounting is exercised both by decomposition
-  (`gml1_chain`) and by a truly fused lowering (`gml1_fused`, C resident in L1). Not yet
-  exercised: the multi-core aggregate (`S·store` HBM contention via `par()`), and a fused
-  chain over multiple M row-bands (the `gml1_fused` kernel is one band, `M == bm`).
+- Output-stationary tiles. Coverage: split-K **sink** per-worker (`gml1_splitk`);
+  chained-matmul reload accounting by decomposition (`gml1_chain`) **and** a truly fused
+  multi-band lowering (`gml1_fused`, C resident in L1, `M/bm` bands); the multi-core
+  `par()` aggregate cap (`gml1_multicore`). Not yet exercised: split-K's `S·store`
+  **write**-side HBM contention (the `par()` validation here is on the GM **read** group),
+  and non-square / mixed-dtype operand combinations.
 - The flat-vs-fitted gap is measured indirectly (the default build is flat); a
   `PTO_BW_MODE=fitted` sweep would measure the fitted curve directly.
 - `bytes_a = bytes_b = 2` (bf16) throughout; fp32 operands (`cpr=2`, `kt=8`) change

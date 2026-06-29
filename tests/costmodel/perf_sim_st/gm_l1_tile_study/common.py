@@ -38,6 +38,12 @@ BW_L1_L0B = 220.5     # GB/s  (L1 -> L0B, the B/"right" port; exactly half of A)
 BW_GM_L1_FITTED_PEAK = 28.61
 BW_GM_L1_FITTED_K = 1107.0
 
+# Aggregate HBM read bandwidth (GiB/s) for the multi-core par() experiment. mlsys26's
+# hbm_aggregate_gibps = 24*135 = 3240 effectively disables the cap (par = active); the
+# realistic A3 figure is ~900, which saturates at 900/135 ~= 6.7 cores. The perf-sim's
+# Hill total_read_gibs models exactly this aggregate cap (BwEff divides peak by ncores).
+HBM_AGGREGATE_GIBS = 900.0
+
 # --- buffer capacities (bytes) ---
 L0A = L0B = 64 * 1024
 L0C = 128 * 1024
@@ -187,14 +193,21 @@ using namespace pto;
 """
 
 
-def write_testcase(name, kernel_include, fn_defs, fids, test_suite):
-    """Write testcase/<name>/{main.cpp, CMakeLists.txt}."""
+def write_testcase(name, kernel_include, fn_defs, fids, test_suite, launch_cfgs=None):
+    """Write testcase/<name>/{main.cpp, CMakeLists.txt}.
+
+    launch_cfgs: optional {fid: "(block_dim, nullptr, nullptr)"} to run a kernel on
+    multiple cores (default single core). LAUNCH_KERNEL reads block_dim and calls
+    SetActiveCoreCount(block_dim), which drives the Hill model's per-core BW divide.
+    """
+    launch_cfgs = launch_cfgs or {}
     tc = TESTCASE_DIR / name
     tc.mkdir(parents=True, exist_ok=True)
     body = [MAIN_HEADER.format(kernel_include=kernel_include)]
     body += fn_defs
     body.append(f"\nTEST({test_suite}, All) {{")
-    body += [f"    LAUNCH_KERNEL({fid}, , (1, nullptr, nullptr));" for fid in fids]
+    body += [f"    LAUNCH_KERNEL({fid}, , {launch_cfgs.get(fid, '(1, nullptr, nullptr)')});"
+             for fid in fids]
     body.append("}")
     (tc / "main.cpp").write_text("\n".join(body) + "\n")
     (tc / "CMakeLists.txt").write_text(CMAKE_TEMPLATE.format(name=name))

@@ -163,14 +163,16 @@ def gen_chain():
 # fused MTE2 = reload(A,B,D), with NO C reload. Single M row-band, Ki one L1 tile. We also
 # emit the matching unfused pair (two RunGemmE2E) so the C-reload saving is read off.
 def gen_fused():
-    cases = [  # (M, K1, Ki, N2, bm, bk, bnE)  -- M == bm, Ki == one C tile (cL0/cAcc <= L0)
-        (128, 256, 128, 256, 128, 64, 64),
+    cases = [  # (M, K1, Ki, N2, bm, bk, bnE)  -- Ki == one C tile (cL0/cAcc <= L0); M/bm bands
+        (128, 256, 128, 256, 128, 64, 64),   # 1 band (M == bm)
         (128, 512, 128, 512, 128, 64, 64),
         (128, 512, 256, 512, 128, 64, 64),
+        (256, 512, 128, 512, 128, 64, 64),   # 2 bands
+        (512, 512, 128, 512, 128, 64, 64),   # 4 bands -- B,D reloaded per band (M/bm)
     ]
     defs, fids, index = [], [], []
     for (M, K1, Ki, N2, bm, bk, bnE) in cases:
-        assert M == bm and bm * Ki * 4 <= L0C and bm * Ki * 2 <= L0A, (M, Ki)
+        assert M % bm == 0 and bm * Ki * 4 <= L0C and bm * Ki * 2 <= L0A, (M, Ki)
         ff = f"fz_{M}_{K1}_{Ki}_{N2}"
         defs.append(f"void {ff}() {{ gm_l1_chain::RunGemmChainFused<float, half, half, "
                     f"{M}, {K1}, {Ki}, {N2}, {bm}, {bk}, {bnE}>(nullptr, nullptr, nullptr, nullptr); }}")
@@ -183,6 +185,43 @@ def gen_fused():
     return _save_index("fused", index)
 
 
+# ------------------------------------------------------------------------- multicore
+# Multi-core aggregate / par(): the perf-sim's Hill total_read_gibs cap is exactly the
+# mlsys26 par(active, peak) = min(active, hbm/peak). gemm_performance partitioned along N
+# (singleCoreN = N/B) runs on B cores; LAUNCH_KERNEL sets SetActiveCoreCount(B) and the
+# capped fids set total_read_gibs = HBM, so per-core BwEff = min(peak, HBM/B). Uncapped:
+# per-core MTE2 ~ 1/B (linear, par = active -- mlsys26's disabled 3240 cap). Capped:
+# per-core MTE2 plateaus once B > HBM/peak (aggregate saturates at HBM) -- par() live.
+def gen_multicore():
+    M = N = 2048
+    K = 512
+    bm = bn = 128
+    bk = 64
+    hbm = C.HBM_AGGREGATE_GIBS
+    defs, fids, index, cfgs = [], [], [], {}
+
+    def emit(fid, B, cap):
+        scn = N // B   # partition the output columns across B cores
+        setup = ("auto _m = pto::mocker::evaluator::MakeFlatHillModel(); "
+                 f"_m.total_read_gibs = {cap}; pto::mocker::evaluator::SetHillBandwidthModel(_m); ")
+        call = (f"RunGemmE2E<float, half, half, float, {B}, {M}, {K}, {N}, {M}, {K}, {N}, "
+                f"{M}, {K}, {scn}, {bm}, {bk}, {bn}, 1, 1, 1, 1>(nullptr, nullptr, nullptr);")
+        defs.append(f"void {fid}() {{ {setup}{call} }}")
+        fids.append(fid)
+        cfgs[fid] = f"({B}, nullptr, nullptr)"
+
+    for B in (1, 2, 4, 8, 16):
+        if N % B or (N // B) % bn:
+            continue
+        emit(f"mc_un_{B}", B, 0.0)      # uncapped: total_read = 0 -> no contention
+        emit(f"mc_cap_{B}", B, hbm)     # capped:   total_read = HBM -> par() saturation
+        index.append(dict(B=B, M=M, N=N, K=K, bm=bm, bk=bk, bn=bn, hbm=hbm,
+                          un=f"mc_un_{B}", cap=f"mc_cap_{B}"))
+    C.write_testcase("gml1_multicore", "gemm_performance_kernel.cpp", defs, fids,
+                     "Gml1Multicore", launch_cfgs=cfgs)
+    return _save_index("multicore", index)
+
+
 ALL = {
     "gml1_reload": gen_reload,
     "gml1_roofline": gen_roofline,
@@ -190,4 +229,5 @@ ALL = {
     "gml1_splitk": gen_splitk,
     "gml1_chain": gen_chain,
     "gml1_fused": gen_fused,
+    "gml1_multicore": gen_multicore,
 }

@@ -73,7 +73,8 @@ into bigger L1 panels — they do **not** change the total bytes.
 | **gml1_stepk** | MTE2 invariant to K-staging depth | mte2 **exactly** flat across `stepK∈{1,2,4}` → model correctly omits a stepK term |
 | **gml1_splitk** | split-K sink: feed/compute `~ Kc=K/S`, output store a constant floor | `mte2/Kc` flat (104.5), `cube ∝ Kc`, `fixp` 0.0% spread; bound flips MTE2→FIXP at the knee — validates `eval_S` |
 | **gml1_chain** | chained `C=A·B`, `E=C·D` by **decomposition**: intermediate C excluded from GM reload | per-term error **≤0.1%**; the C round-trip (mm1 store + mm2 C-reload) is exactly what fusion drops — **23→30% saving** as Ki grows |
-| **gml1_fused** | a **truly fused** single-core `RunGemmChain` kernel (C resident in L1) | `fused mte2 = reload(A,B,D)` to **−0.0%** — C never TLOAD'd from GM; **40–44% reload saving** vs the unfused pair |
+| **gml1_fused** | a **truly fused** `RunGemmChain` kernel (C resident in L1), 1–4 M row-bands | `fused mte2 = reload(A,B,D)` to **−0.0%** — C never TLOAD'd from GM; B,D reloaded per band; **40–44% reload saving** |
+| **gml1_multicore** | `par(active,peak)=min(active,HBM/peak)` via the Hill aggregate cap | uncapped `mte2·B` constant (linear); capped per-core bw = `min(135,900/B)` to ≤0.4%; aggregate saturates at 900 GiB/s past the 6.7-core knee |
 
 ### The one regime where `max` is optimistic
 
