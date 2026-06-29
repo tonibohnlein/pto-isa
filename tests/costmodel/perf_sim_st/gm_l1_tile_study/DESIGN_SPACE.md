@@ -49,6 +49,7 @@ takes the `max` over the DDR and compute pipes.
 | split-K: feed/compute `~ Kc`, store a constant floor | `gml1_splitk` | `mte2/Kc` flat (104.5), `cube ∝ Kc`, `fixp` 0.0% spread; bound flips MTE2→FIXP at the knee |
 | output store width = **output dtype (2 B)**, not 4-B accumulator | `gml1_splitk` | `fixp = M·N·2/70` to +0.1% (512² and 1024²) |
 | chained matmul: intermediate C **excluded** from GM reload | `gml1_chain` | per-term error ≤0.1%; C round-trip = mm1 store + mm2 C-reload; fusion saves 23→30% as Ki grows |
+| truly fused lowering (C resident in L1) hits the fused number | `gml1_fused` | `fused mte2 = reload(A,B,D)` to −0.0%; C never TLOAD'd from GM; 40–44% reload saving |
 
 ### Where `max(feed, writes)` is optimistic [M]
 
@@ -88,8 +89,14 @@ is bf16; an fp32-output matmul would be charged 2× the sim's store floor.
 eliminates is exactly `MM1`'s C-store (`fixp`) + `MM2`'s C-reload (the lhs half of its
 `mte2`); each term matches the model to ≤0.1%. Sweeping the shared dim `Ki = N1 = K2`,
 the round-trip scales `~ M·Ki` (saving 23→30% of total GM traffic) while the boundary
-reloads `A,B,D` are unchanged — the cost-model accounting. (This validates *which*
-traffic fusion removes; whether the lowering keeps `C` in L1 is a separate concern.)
+reloads `A,B,D` are unchanged — the cost-model accounting.
+
+`gml1_fused` then closes the loop with a **truly fused** single-core kernel
+(`chain_fused_kernel.cpp`, `RunGemmChainFused`): MM1 computes `C` in L0C, `TMOV` drains
+it L0C→L1 (`copy_matrix_cc_to_cbuf`, fp32→bf16), and MM2 `TEXTRACT`s `C` from L1 — `C`
+never touches GM. Measured `fused mte2 = reload(A,B,D)` to **−0.0%** (zero C reload),
+and 40–44% reload saving vs the unfused pair. So the produced-exclusion is not just an
+accounting identity — a realizable lowering hits exactly the number the model scores.
 
 ## Multi-core (the `par` cap)
 
@@ -132,11 +139,11 @@ than re-fitting one flat constant. (The fitted Hill curve is also where the mult
 
 ## Caveats
 
-- Single core, output-stationary (`RunGemmE2E`'s only mode). Split-K **sink** reduction
-  is exercised per-worker (`gml1_splitk`); chained matmul reload accounting is exercised
-  by decomposition (`gml1_chain`, two separate runs). Not yet exercised: a truly fused
-  lowering (C resident in L1) and the multi-core aggregate (`S·store` HBM contention via
-  `par()`).
+- Single core, output-stationary. Split-K **sink** reduction is exercised per-worker
+  (`gml1_splitk`); chained-matmul reload accounting is exercised both by decomposition
+  (`gml1_chain`) and by a truly fused lowering (`gml1_fused`, C resident in L1). Not yet
+  exercised: the multi-core aggregate (`S·store` HBM contention via `par()`), and a fused
+  chain over multiple M row-bands (the `gml1_fused` kernel is one band, `M == bm`).
 - The flat-vs-fitted gap is measured indirectly (the default build is flat); a
   `PTO_BW_MODE=fitted` sweep would measure the fitted curve directly.
 - `bytes_a = bytes_b = 2` (bf16) throughout; fp32 operands (`cpr=2`, `kt=8`) change

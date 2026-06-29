@@ -156,13 +156,29 @@ def analyze_chain():
     print("     boundary reloads (A,B,D) are unchanged -- the model's chained accounting.")
 
 
-ALL = {
-    "gml1_reload": analyze_reload,
-    "gml1_roofline": analyze_roofline,
-    "gml1_stepk": analyze_stepk,
-    "gml1_splitk": analyze_splitk,
-    "gml1_chain": analyze_chain,
-}
+# ----------------------------------------------------------------------------- fused
+def analyze_fused():
+    print("\n=== fused: truly fused chain -- intermediate C never round-trips GM ===")
+    rows = sorted(_index("fused"), key=lambda r: (r["K1"], r["Ki"]))
+    print(f"  {'M,K1,Ki,N2':>17} | {'fz.mte2':>8} {'pred(ABD)':>9} {'err%':>6} | "
+          f"{'unfused':>8} {'C saved':>8} {'save%':>6} | {'fz.fixp':>8}")
+    for x in rows:
+        M, K1, Ki, N2, bm = x["M"], x["K1"], x["Ki"], x["N2"], x["bm"]
+        fz, u1, u2 = C.read_aic(x["fused"]), C.read_aic(x["mm1"]), C.read_aic(x["mm2"])
+        # Model fused reload = MM1 (A+B) + MM2 rhs-only (D); C is `produced`, excluded.
+        ab = C.reload_bytes(M, Ki, K1, bm, Ki)         # MM1 output C[M,Ki], width w = Ki
+        d_only = M * N2 * Ki / bm * 2                  # D reload (rhs -> /h = /bm), bf16
+        pred = C.transfer_cycles(ab + d_only, C.BW_GM_L1)
+        err = (fz["mte2"] - pred) / pred * 100 if pred else float("nan")
+        unfused = u1["mte2"] + u2["mte2"]              # both matmuls reload from GM (incl. C)
+        saved = unfused - fz["mte2"]
+        save = saved / unfused * 100 if unfused else 0.0
+        tag = f"{M},{K1},{Ki},{N2}"
+        print(f"  {tag:>17} | {fz['mte2']:>8} {pred:>9.0f} {err:>+5.1f}% | "
+              f"{unfused:>8} {saved:>8} {save:>5.1f}% | {fz['fixp']:>8}")
+    print("  -> fused MTE2 matches reload(A,B,D): the intermediate C is NEVER loaded from GM")
+    print("     (TMOV drains it L0C->L1, MM2 TEXTRACTs it from L1). vs the unfused two-matmul")
+    print("     baseline, fusion removes the whole C round-trip -- the produced-exclusion, live.")
 
 
 # ---------------------------------------------------------------------------- fitted
@@ -197,3 +213,13 @@ def analyze_fitted():
     print("      fitted curve, AND fitted reload depends on TLOAD granularity (tile/stepK) -- a")
     print("      per-transfer effect the flat bytes/bw term cannot express. Calibrating bw_gm_l1")
     print("      to a single number understates fine-tile reload; consider the Hill form.")
+
+
+ALL = {
+    "gml1_reload": analyze_reload,
+    "gml1_roofline": analyze_roofline,
+    "gml1_stepk": analyze_stepk,
+    "gml1_splitk": analyze_splitk,
+    "gml1_chain": analyze_chain,
+    "gml1_fused": analyze_fused,
+}

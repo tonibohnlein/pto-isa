@@ -43,6 +43,7 @@ set(ALL_TESTCASES
     gml1_stepk
     gml1_splitk
     gml1_chain
+    gml1_fused
     conv2d_perf_sim
     topk_perf_sim
     fa_perf_sim

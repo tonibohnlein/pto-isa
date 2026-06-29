@@ -157,10 +157,37 @@ def gen_chain():
     return _save_index("chain", index)
 
 
+# ----------------------------------------------------------------------------- fused
+# Truly fused chain (chain_fused_kernel.cpp): C = A*B kept in L1, E = C*D from L1.
+# Confirms DIRECTLY (not by decomposition) that the intermediate C never round-trips GM:
+# fused MTE2 = reload(A,B,D), with NO C reload. Single M row-band, Ki one L1 tile. We also
+# emit the matching unfused pair (two RunGemmE2E) so the C-reload saving is read off.
+def gen_fused():
+    cases = [  # (M, K1, Ki, N2, bm, bk, bnE)  -- M == bm, Ki == one C tile (cL0/cAcc <= L0)
+        (128, 256, 128, 256, 128, 64, 64),
+        (128, 512, 128, 512, 128, 64, 64),
+        (128, 512, 256, 512, 128, 64, 64),
+    ]
+    defs, fids, index = [], [], []
+    for (M, K1, Ki, N2, bm, bk, bnE) in cases:
+        assert M == bm and bm * Ki * 4 <= L0C and bm * Ki * 2 <= L0A, (M, Ki)
+        ff = f"fz_{M}_{K1}_{Ki}_{N2}"
+        defs.append(f"void {ff}() {{ gm_l1_chain::RunGemmChainFused<float, half, half, "
+                    f"{M}, {K1}, {Ki}, {N2}, {bm}, {bk}, {bnE}>(nullptr, nullptr, nullptr, nullptr); }}")
+        u1, u2 = f"{ff}_mm1", f"{ff}_mm2"
+        defs.append(C.emit_e2e(u1, M, K1, Ki, bm, bk, Ki))     # unfused MM1: A*B -> C[M,Ki]
+        defs.append(C.emit_e2e(u2, M, Ki, N2, bm, Ki, bnE))    # unfused MM2: C*D -> E (bk=Ki)
+        fids += [ff, u1, u2]
+        index.append(dict(M=M, K1=K1, Ki=Ki, N2=N2, bm=bm, bk=bk, bnE=bnE, fused=ff, mm1=u1, mm2=u2))
+    C.write_testcase("gml1_fused", "chain_fused_kernel.cpp", defs, fids, "Gml1Fused")
+    return _save_index("fused", index)
+
+
 ALL = {
     "gml1_reload": gen_reload,
     "gml1_roofline": gen_roofline,
     "gml1_stepk": gen_stepk,
     "gml1_splitk": gen_splitk,
     "gml1_chain": gen_chain,
+    "gml1_fused": gen_fused,
 }
