@@ -24,7 +24,7 @@ micro-kernel"** (Goto & van de Geijn, TOMS 2008; Smith et al., IPDPS 2014; Van Z
 | --- | --- | --- | --- |
 | **1** | **Tile sizes per memory level** | A (tile) **+** C (N_acc) | L0 block `(m,n,k)` **and** the accumulator micro-tile `(N_acc = mr×nr)` — the *same* sizing decision at two levels |
 | **2** | **Loop permutation → stationarity** | B | which operand is pinned: output-stationary (pin C) / A-stationary / B-stationary — a *consequence* of loop order, not a free dial |
-| **3** | **Pipeline depth per buffer** | D | `depthA, depthB, depthC ∈ {1,2,S}` |
+| **3** | **Double-buffer choice per buffer** | D | `dbA, dbB, dbC ∈ {1,2}` (NOT multistage — see Realizability) |
 
 **Why 4→3:** "tile (m,n,k)" and "accumulator block N_acc" are both *tile-size*
 choices — the L0 block (`mc,nc,kc`) and the MAC micro-tile (`mr,nr`); BLIS sizes
@@ -33,6 +33,37 @@ them level-by-level as one parameter family (Low'16). And "stationarity" is just
 D = axis 3.** Residency map, verbatim [V] (Smith'14 Fig.1): *"An `mr × nr` block of
 C is in the registers; a `kc × nr` sliver of B̃ in L1; the `mr × kc` sliver of Ã is
 streamed from L2."*
+
+## Realizability in pypto (the reality check)
+
+The goal is a highly-optimized `AutoTileMatmulL0` whose chooser navigates this whole
+space; the lowering for each algorithm is implemented incrementally. What is /
+isn't realizable:
+
+| knob | navigable? | realized by | status today |
+| --- | --- | --- | --- |
+| **A** tile `(m,n,k)` | **yes** | `ChooseL0Tile` output | implemented |
+| **A** micro-tile `N_acc` | yes (later) | new pass lowering | not yet (`N_acc=1`) |
+| **B** stationarity / loop order | yes (later) | new pass lowering | only **output-stationary** today (#1855) |
+| **D** double-buffer choice `dbA/dbB/dbC ∈ {1,2}` | **yes** | `pipeline_stages` attr + `LowerPipelineLoops` | `dbA=dbB=2` fixed; `dbC=1` (the L0C-DB win is `dbC=2`) |
+| **D′** multistage prefetch (depth `> 2`) | **NO** | — | not realizable on this hardware |
+
+So the chooser's eventual output grows from `(m,n,k)` to the **design point**
+`(m, n, k, N_acc, stationarity, dbA, dbB, dbC)` — **minus prefetch depth**, fixed at
+≤2 (no multistage). The cost model is scoped to exactly these knobs.
+
+## Terminology — fix the "full-K" collision
+
+"full-K" is overloaded three ways; we drop it for unambiguous terms:
+
+| term seen | what it actually is | our axis term |
+| --- | --- | --- |
+| pypto **"full-K"** (#1855) | each output tile accumulates the *complete* K reduction in L0C, M/N-tiled, direct-store | **output-stationary (OS)** — axis B |
+| this study's earlier **"full-K"** | a `k=K` tile (whole reduction in one L0 load) that *enables* operand reuse | **k=K single-pass** — an axis-A tile-size value |
+| literature/GPU **"split-K"** | partition K across *parallel* workers + reduce | **not us** (single core) |
+
+Going forward: **stationarity ∈ {OS, A-stationary, B-stationary}** (axis B);
+**reduction ∈ {k-blocked (k<K), k=K single-pass}** (axis A). Avoid "full-K"/"split-K".
 
 ## Untangling: old "variant" → axis settings
 
@@ -122,6 +153,36 @@ N_acc·m·n·bytes_c ≤ |L0C| / depthC
   **13–37%** (validated). For deep-K compute-bound tiles the drain hides under
   compute and `depthC=1` suffices — reconciling our result with the BLIS default.
 
+## Cost model — scoring a design point (first formulation)
+
+The chooser scores a design point `P = (m, n, k, N_acc, stationarity, dbC)` and
+returns the min-`wall(P)`. `dbA/dbB` are *derived* from stationarity (the stationary
+operand is single-buffered and uses the full buffer; the moving operand is
+double-buffered); prefetch depth is not a variable (≤2). All hardware params come
+from `BackendHandler::GetCostModel()` (a2a3 real, a5 placeholder).
+
+```
+# per-pipe cycle costs
+C_mad   = ⌈M/m⌉·⌈N/n⌉·⌈K/k⌉ · (6 + cpr·⌈m/16⌉·⌈k/kt⌉·⌈n/16⌉)        # cube; tile-only
+C_drain = M·N·bytes_c / BW_drain                                    # FIXPIPE; shape-only
+C_load  =                                                            # MTE1, BW-weighted, by reuse
+   OS      : ba·M·K·⌈N/n⌉/(N_acc·BW_A) + bb·K·N·⌈M/m⌉/BW_B
+   A-stat  : ba·M·K/BW_A               + bb·K·N·⌈M/m⌉/BW_B           # A loaded once/row (k=K)
+   B-stat  : ba·M·K·⌈N/n⌉/BW_A         + bb·K·N/BW_B                 # B loaded once/col (k=K)
+
+wall(P) = (dbC==2) ? max(C_load, C_mad, C_drain)                     # drain hidden
+                   : max(C_load, C_mad) + C_drain                    # drain exposed (cube stalls)
+```
+
+Legality (capacity):
+`m·k·ba ≤ L0A/dbA`, `k·n·bb ≤ L0B/dbB`, `N_acc·m·n·bc ≤ L0C/dbC`.
+
+Search: a handful of `(m,n,k)` candidates (BW-aspect seed `m=√(C0·bb·BW_A/(ba·BW_B))`
++ max-area + min-tile) × `stationarity ∈ {OS,AS,BS}` × `N_acc ∈ {1,2,4,…}` ×
+`dbC ∈ {1,2}` — pick the min `wall` **among points whose lowering is implemented**
+(a "realizable mask"). Today the mask = `{OS, N_acc=1, dbC=1}` (just re-scores the
+tile); each new lowering widens the mask without touching the cost model.
+
 ## When to use which — the bound decides (validated regimes)
 
 | bound | regime | deciding axis | setting |
@@ -135,8 +196,9 @@ N_acc·m·n·bytes_c ≤ |L0C| / depthC
 - **Deep K:** output-stationary — pin the fp32 C tile in L0C, accumulate full K
   before draining (AI on the operand ceiling); operand reuse via `N_acc`.
 - **Short K (`k=K` fits L0):** B-stationary (pin slow-port operand), stream A.
-- **Aspect `m:n = 2:1`**, tile side `~√(L0)`; depth-2 on the moving operand(s),
-  the slow B port possibly deeper; `depthC = ⌈drain/compute⌉+1` (2 when drain-bound).
+- **Aspect `m:n = 2:1`**, tile side `~√(L0)`; **double-buffer (depth 2) the moving
+  operand(s)** — multistage (>2) is not realizable here, so a load that exceeds one
+  stage's compute is simply exposed; `dbC = 2` when drain-bound (small-K), else `1`.
 
 ## Caveats / not-yet-verified
 
