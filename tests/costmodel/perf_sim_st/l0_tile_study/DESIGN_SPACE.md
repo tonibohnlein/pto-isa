@@ -43,14 +43,16 @@ isn't realizable:
 | knob | navigable? | realized by | status today |
 | --- | --- | --- | --- |
 | **A** tile `(m,n,k)` | **yes** | `ChooseL0Tile` output | implemented |
-| **A** micro-tile `N_acc` | yes (later) | new pass lowering | not yet (`N_acc=1`) |
+| **A** micro-tile `N_acc` | **no — pruned** | — | evaluated in the perf-sim, found dominated/marginal → removed; fixed `N_acc=1` |
 | **B** stationarity / loop order | yes (later) | new pass lowering | only **output-stationary** today (#1855) |
 | **D** double-buffer choice `dbA/dbB/dbC ∈ {1,2}` | **yes** | `pipeline_stages` attr + `LowerPipelineLoops` | `dbA=dbB=2` fixed; `dbC=1` (the L0C-DB win is `dbC=2`) |
 | **D′** multistage prefetch (depth `> 2`) | **NO** | — | not realizable on this hardware |
 
-So the chooser's eventual output grows from `(m,n,k)` to the **design point**
-`(m, n, k, N_acc, stationarity, dbA, dbB, dbC)` — **minus prefetch depth**, fixed at
-≤2 (no multistage). The cost model is scoped to exactly these knobs.
+So the chooser's output grows from `(m,n,k)` to the **design point**
+`(m, n, k, stationarity, dbC)` (with `dbA/dbB` derived from stationarity) — **minus
+N_acc** (evaluated in the perf-sim and pruned: dominated by tile-sizing for clean
+dims, marginal/padding-contingent otherwise) and **minus prefetch depth** (fixed ≤2,
+no multistage). The cost model is scoped to exactly these knobs.
 
 ## Terminology — fix the "full-K" collision
 
