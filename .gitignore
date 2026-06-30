@@ -52,3 +52,6 @@ docs/mkdocs/src/scripts/
 docs/mkdocs/src/tests/
 kernels/**/**/**/build/
 PROF*/
+# Cost-model study artifacts (regenerated from the formula spec / sim runs; not source)
+**/formula_params_generated.hpp
+perf_sim_output/
