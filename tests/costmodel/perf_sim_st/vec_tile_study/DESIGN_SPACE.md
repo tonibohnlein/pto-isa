@@ -14,7 +14,7 @@ experiments that verify them. Sibling of `gm_l1_tile_study/DESIGN_SPACE.md`.
 | count-mode floor (+16) | not modeled | ✗ | `vec_reduce` [M] (reductions run in count mode) |
 | reduction cost | `head+slope_reduce·repeat+tail`, `repeat=ROWS·COLS/64` | **✗ — structurally wrong** (a tree, not one op; reduce W is ROWS-independent) | `vec_reduce` [M] |
 | reduced-axis sink split-S | the cube split-K analog, sink-only | — | _planned_ `vec_splitS` |
-| implicit streaming recompute | `N_passes = #reductions+1` (upper bound) | ✗ | _planned_ `vec_stream` |
+| implicit streaming recompute | `N_passes = #reductions+1` (upper bound) | **✗ — 3–4× pessimistic** (real emit is online) | `vec_stream` [M] |
 | GM↔UB per-direction `par()` cap | `io/par(active, bw)` | read pool ✓ (`gml1_contention`) | — |
 | DMA-shape penalty (sub-burst width) | `max(1, burst/(w·dtype))` | — | _planned_ |
 | double-buffer floor (small-tile serialize) | `max(c,d)` iff `tile≥2·reg` | — | _planned_ |
@@ -27,6 +27,7 @@ experiments that verify them. Sibling of `gm_l1_tile_study/DESIGN_SPACE.md`.
 | startup paid **once per stream**, not per op | `vec_pointwise` | `vec = head+tail + NOPS·slope·repeat` to 0.0%; mlsys26's per-op charge overcounts **1.2×→2.7×** (NOPS 1→16) |
 | a reduction is a barrier-separated **tree**, not one op | `vec_reduce` | `TROWSUM = 45·(COLS/64)+6`, `TCOLSUM = 16(R-1)+30·log₂R`, both to **0.0%** |
 | reduce-W (`TROWSUM`) is **ROWS-independent** (count mode) | `vec_reduce` | sim flat at 96 over ROWS 8→64; mlsys26 (`repeat=ROWS·COLS/64`) overcounts up to **19×** |
+| UB-overflow streaming is **online** (~1 wide pass), not `#reductions+1` | `vec_stream` | online softmax wide body flat (≤1×) over NCHUNKS 1→8; mlsys26's `3×` is 3–4× over |
 
 ## vec_pointwise — the per-op formula + chain accounting [M]
 
@@ -69,12 +70,38 @@ not the product. **Caveat:** the perf-sim's count-mode flat-per-pass is itself c
 real HW (a count-mode op over more rows *does* cost more on device) — flag for the device
 eval; here it is the measured ground truth the analytic model must match.
 
+## vec_stream — UB-overflow streaming is online (~1 pass), not #reductions+1 [M]
+
+When a reduced band overflows UB the schedule streams the reduced axis in chunks. mlsys26
+multiplies compute + IO by `N_passes = #reductions + 1` (softmax = 3) and flags it a
+"pessimistic upper bound." The canonical pto-isa emit (`pto_macro_fa_softmax`) is **online
+/ flash**: each chunk's `exp` runs **once per element**; a running max/sum is corrected with
+a thin `[H,1]` rescale per chunk — no re-read. Measuring a softmax numerator (rowmax →
+center → exp → rowsum) over `[8,512]` streamed over COLS in NCHUNKS:
+
+| NCHUNKS | chunk W | `vec_cycles` | ratio to materialized | mlsys26 `3×` |
+| - | --- | --- | --- | --- |
+| 1 | 512 | 967 | 1.00× | 3.0× over |
+| 4 | 128 | 940 | 0.97× | 3.1× over |
+| 8 | 64 | 728 | 0.75× | 4.0× over |
+
+The wide body is **flat** in NCHUNKS (the per-chunk reductions re-split the *same* total
+work; at chunk W=64 they hit the cheaper single-`vcadd` base, so it even dips). The measured
+kernel omits the thin flash correction (a layout-incompatible `[H,1]` `TEXP`/`TMAX`), but
+that surcharge is `O(NCHUNKS)` thin-tile ops — small. So the real online cost is `~1× wide
+body + O(NCHUNKS) thin`, and mlsys26's `3×` overcounts every streamed softmax by **3–4×**.
+
+**Implication for mlsys26.** Replace the `#reductions+1` multiplier with what its own comment
+asks for: a per-op-liveness model — wide-body recompute factor **≈1**, plus a per-chunk
+surcharge (re-paid vector startup at each barrier + `O(NCHUNKS·ROWS·1)` thin correction). The
+current model triples the cost of the large-context attention regime it most needs to get right.
+
 ## Next experiments
 
 - **`vec_splitS`** — the sink-only reduced-axis cross-core split (the cube split-K analog):
   S partials, the thin `[H,1]`/`[1,W]` atomic-add store folded into the roofline.
-- **`vec_stream`** — UB-overflow streaming: is the real recompute cost `#reductions+1`
-  passes, or less (per-op liveness)?
+- **`vec_dma`** — GM↔UB I/O: the DMA-shape penalty (sub-burst width) + the double-buffer
+  serialization floor, on the `mte2_aiv`/`mte3` pipes.
 
 ## Caveats
 

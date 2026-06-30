@@ -49,6 +49,7 @@ set(ALL_TESTCASES
     gml1_contention
     vec_pointwise
     vec_reduce
+    vec_stream
     conv2d_perf_sim
     topk_perf_sim
     fa_perf_sim

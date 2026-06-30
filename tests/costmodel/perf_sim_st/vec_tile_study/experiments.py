@@ -150,7 +150,59 @@ def gen_reduce():
     return _save_index("reduce", dict(rs_cols=rs_cols, rs_rows=rs_rows, cs_rows=cs_rows))
 
 
+# UB-overflow streaming. A softmax chain (rowmax -> sub -> exp -> rowsum -> div) either fits
+# UB (MATERIALIZED, one pass) or streams the reduced axis in chunks. The canonical pto-isa
+# emit is ONLINE/flash: each chunk's exp runs ONCE; a thin [H,1] correction (max-merge +
+# running-sum rescale) per chunk replaces any re-read. So the wide-body recompute factor is
+# ~1, NOT mlsys26's #reductions+1. We measure the streamed/materialized vec_cycles ratio.
+_VEC_STREAM_KERNEL = r"""
+// Online softmax numerator per chunk: rowmax -> center -> exp -> rowsum over [ROWS,CW]. The
+// exp runs ONCE per element regardless of NCHUNKS (the wide body splits, it does not repeat).
+// The full flash emit adds a thin [H,1] max-merge + running-sum rescale per chunk (a few
+// ColMajor/RowMajor reduce-tile ops) -- a small surcharge we account for analytically, omitted
+// here to keep one clean RowMajor wide-body kernel. NCHUNKS=1 is the materialized single pass.
+template <typename T, int ROWS, int COLS, int NCHUNKS>
+AICORE inline void SoftmaxStream() {
+    constexpr int CW = COLS / NCHUNKS;                 // chunk width (a multiple of 64)
+    using CT = pto::Tile<pto::TileType::Vec, T, ROWS, CW, pto::BLayout::RowMajor, ROWS, CW>;
+    using RT = pto::Tile<pto::TileType::Vec, T, ROWS, 1, pto::BLayout::ColMajor, ROWS, 1>;
+    constexpr int cb = ROWS * CW * (int)sizeof(T);
+    CT xc, tmp; RT mx, sm;
+    TASSIGN(xc, 0);
+    TASSIGN(tmp, cb);
+    TASSIGN(mx, 2 * cb);
+    TASSIGN(sm, 2 * cb + ROWS * (int)sizeof(T));
+    for (int j = 0; j < NCHUNKS; ++j) {
+        TROWMAX(mx, xc, tmp);          // [H,CW] -> [H,1]  chunk max
+        TROWEXPANDSUB(xc, xc, mx);     // center (broadcast [H,1] over CW)
+        TEXP(xc, xc);                  // exp ONCE over the chunk
+        TROWSUM(sm, xc, tmp);          // [H,CW] -> [H,1]  chunk sum
+    }
+}
+"""
+
+
+def gen_stream():
+    """vec_stream: ground mlsys26's UB-overflow recompute multiplier (N_passes=#reductions+1).
+
+    A softmax chain over [ROWS,COLS] streamed over COLS in NCHUNKS chunks (online/flash). The
+    wide-body exp runs once per element regardless of NCHUNKS, so the streamed/materialized
+    vec_cycles ratio stays ~1 + O(NCHUNKS) thin corrections -- NOT mlsys26's flat 3x.
+    """
+    ROWS, COLS = 8, 512
+    nchunks = [1, 2, 4, 8]
+    defs, fids, idx = [_VEC_STREAM_KERNEL], [], []
+    for n in nchunks:
+        fid = f"sm_n{n}"
+        defs.append(f"void {fid}() {{ SoftmaxStream<float, {ROWS}, {COLS}, {n}>(); }}")
+        fids.append(fid)
+        idx.append(dict(nchunks=n, rows=ROWS, cols=COLS, fid=fid))
+    C.write_testcase("vec_stream", defs, fids, "VecStream")
+    return _save_index("stream", dict(rows=ROWS, cols=COLS, sweep=idx))
+
+
 ALL = {
     "vec_pointwise": gen_pointwise,
     "vec_reduce": gen_reduce,
+    "vec_stream": gen_stream,
 }

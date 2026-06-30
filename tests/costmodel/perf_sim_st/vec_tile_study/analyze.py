@@ -104,7 +104,29 @@ def analyze_reduce():
     print("     perf-sim's count-mode flat-per-pass is itself coarse vs real HW -- flag for device.)")
 
 
+def analyze_stream():
+    print("\n=== stream: UB-overflow softmax is ONLINE (~1 wide pass), not #reductions+1 re-reads ===")
+    idx = _index("stream")
+    rows = sorted(idx["sweep"], key=lambda r: r["nchunks"])
+    mat = C.read_aiv(rows[0]["fid"])["vec"]   # NCHUNKS=1 = the materialized single-pass baseline
+    n_passes_mlsys = 3   # softmax has 2 reductions (rowmax, rowsum) -> mlsys26 N_passes=#red+1=3
+    print(f"  softmax [{idx['rows']},{idx['cols']}] streamed over COLS; materialized (N=1) vec={mat}")
+    print(f"  {'NCHUNKS':>7} {'CW':>5} | {'sim_vec':>7} {'ratio':>6} | {'mlsys26 3x':>10} {'over':>5}")
+    for x in rows:
+        sim = C.read_aiv(x["fid"])["vec"]
+        mlsys = n_passes_mlsys * mat
+        print(f"  {x['nchunks']:>7} {x['cols'] // x['nchunks']:>5} | {sim:>7} {sim / mat:>5.2f}x | "
+              f"{mlsys:>10} {mlsys / sim:>4.1f}x")
+    print("  -> online streaming runs the wide-body exp ONCE per element (the per-chunk reductions")
+    print("     re-split the SAME total work + a thin [H,1] max/sum rescale), so the ratio stays")
+    print("     well under mlsys26's flat 3x. mlsys26 multiplies compute by #reductions+1 on UB")
+    print("     overflow -> ~3x pessimistic on every streamed softmax (large-context attention).")
+    print("     *** grounding gap: its own comment asks for 'per-op liveness' -- wide-body factor")
+    print("     ~1, surcharge = per-chunk re-paid startup + O(NCHUNKS) thin correction, not x3.")
+
+
 ALL = {
     "vec_pointwise": analyze_pointwise,
     "vec_reduce": analyze_reduce,
+    "vec_stream": analyze_stream,
 }
