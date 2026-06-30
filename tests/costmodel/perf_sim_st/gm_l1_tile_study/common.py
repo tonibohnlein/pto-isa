@@ -171,6 +171,22 @@ def read_aic(fid, csv_dir=None):
     raise RuntimeError(f"no AIC row in {p}")
 
 
+def read_aiv(fid, csv_dir=None):
+    """Return one AIV sub-core's pipe busy cycles for kernel function `fid`.
+
+    The vector unit splits into two sub-cores (AIV0/AIV1) under each AIC; they carry equal
+    per-core work, so we read AIV0. mte2 here is mte2_aiv_cycles (GM->UB, the vector read
+    pipe), the sibling of the AIC's mte2_aic_cycles (GM->L1). Both draw from total_read_gibs.
+    """
+    p = (csv_dir or CSV_DIR) / f"{fid}_pipeline_summary.csv"
+    with p.open() as f:
+        for r in csv.DictReader(f):
+            if r["unit"] == "AIV0":
+                return dict(total=int(r["total_cycles"]), mte2=int(r["mte2_aiv_cycles"]),
+                            vec=int(r["vec_cycles"]), mte3=int(r["mte3_cycles"]))
+    raise RuntimeError(f"no AIV0 row in {p}")
+
+
 # RunGemmE2E<float,half,half,float, blockDim, m,k,n, valid..., singleCore..., base..., steps>
 # bf16 operands, fp32 accumulate -- the autotiler's default GEMM dtypes. Single core
 # (blockDim=1, singleCore = whole problem) isolates the per-core reload our model scores.

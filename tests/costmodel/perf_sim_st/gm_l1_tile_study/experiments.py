@@ -253,6 +253,63 @@ def gen_decision():
     return _save_index("decision", index)
 
 
+# ----------------------------------------------------------------------- contention
+# Read-pool CONTENTION. The perf-sim groups GM_TO_L1 (cube reload, mte2_aic) and GM_TO_UB
+# (vector load, mte2_aiv) onto ONE shared total_read_gibs pool (HillBandwidthModel::
+# GroupTotal), so BwEff throttles each to total_read/ncores. We load a FIXED per-core
+# byte volume on each pipe and sweep the active core count B with the pool capped at 900:
+# past each pipe's knee (900/peak) BOTH collapse to 900/B -- the shared HBM the mlsys26
+# cost model misses (it caps cube-feed and vector-io independently, each at the full 900,
+# so a mixed kernel is charged ~2x the real aggregate). Uncapped is the no-contention base.
+# The dst tile's TileType picks the pipe: Mat -> GM_TO_L1/MTE2_AIC, Vec -> GM_TO_UB/MTE2_AIV.
+_GM_LOADS_KERNEL = r"""
+template <pto::TileType LOC, typename T, int ROWS, int COLS, int N_LOADS>
+AICORE inline void RunGmLoads(__gm__ T *src) {
+    using ShapeDyn  = pto::Shape<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
+    using StrideDyn = pto::Stride<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
+    using Global    = pto::GlobalTensor<T, ShapeDyn, StrideDyn, pto::Layout::ND>;
+    using TileT     = pto::Tile<LOC, T, ROWS, COLS, pto::BLayout::RowMajor, -1, -1>;
+    TileT tile(ROWS, COLS);
+    TASSIGN(tile, 0x0);
+    constexpr int elems = ROWS * COLS;
+    ShapeDyn  shape(1, 1, 1, ROWS, COLS);
+    StrideDyn stride(elems, elems, elems, COLS, 1);
+    for (int i = 0; i < N_LOADS; ++i) {
+        Global g(src, shape, stride);
+        TLOAD(tile, g);
+    }
+}
+"""
+
+
+def gen_contention():
+    hbm = C.HBM_AGGREGATE_GIBS
+    ROWS, COLS, NLD = 128, 256, 64   # fixed per-core load volume (NLD x ROWS x COLS x 2B)
+    Bs = [1, 2, 4, 8, 16, 24]
+    defs, fids, cfgs, sweep = [_GM_LOADS_KERNEL], [], {}, []
+
+    def pre(cap):  # set the shared read pool (0 => uncapped control)
+        return ("auto _m = pto::mocker::evaluator::MakeFlatHillModel(); "
+                f"_m.total_read_gibs = {cap}; pto::mocker::evaluator::SetHillBandwidthModel(_m); ")
+
+    def emit(fid, loc, B, cap):
+        call = f"RunGmLoads<pto::TileType::{loc}, half, {ROWS}, {COLS}, {NLD}>(nullptr);"
+        defs.append(f"void {fid}() {{ {pre(cap)}{call} }}")
+        fids.append(fid)
+        cfgs[fid] = f"({B}, nullptr, nullptr)"
+
+    emit("ct_cube_un", "Mat", 1, 0.0)   # uncapped baselines: derive bytes + confirm peak
+    emit("ct_vec_un",  "Vec", 1, 0.0)
+    for B in Bs:
+        emit(f"ct_cube_{B}", "Mat", B, hbm)
+        emit(f"ct_vec_{B}",  "Vec", B, hbm)
+        sweep.append(dict(B=B, cube=f"ct_cube_{B}", vec=f"ct_vec_{B}"))
+    C.write_testcase("gml1_contention", "gemm_performance_kernel.cpp", defs, fids,
+                     "Gml1Contention", launch_cfgs=cfgs)
+    return _save_index("contention", dict(rows=ROWS, cols=COLS, nld=NLD, hbm=hbm,
+                                          cube_un="ct_cube_un", vec_un="ct_vec_un", sweep=sweep))
+
+
 ALL = {
     "gml1_reload": gen_reload,
     "gml1_roofline": gen_roofline,
@@ -262,4 +319,5 @@ ALL = {
     "gml1_fused": gen_fused,
     "gml1_multicore": gen_multicore,
     "gml1_decision": gen_decision,
+    "gml1_contention": gen_contention,
 }

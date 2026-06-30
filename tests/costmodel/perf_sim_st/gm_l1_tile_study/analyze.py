@@ -287,6 +287,43 @@ def analyze_fitted():
     print("      to a single number understates fine-tile reload; consider the Hill form.")
 
 
+# ------------------------------------------------------------------------ contention
+# Do cube (GM->L1, mte2_aic) and vector (GM->UB, mte2_aiv) reads share ONE HBM pool? The
+# perf-sim's GroupTotal maps both onto total_read_gibs, so past each pipe's knee both
+# throttle to 900/B. Back out each pipe's effective bw as peak * (uncapped_cyc / capped_cyc)
+# -- a pure ratio, no byte counting needed -- and check it collapses to the shared 900/B.
+def analyze_contention():
+    print("\n=== contention: GM->L1 (cube) + GM->UB (vector) share ONE total_read pool ===")
+    meta = _index("contention")
+    hbm = meta["hbm"]
+    pk_c, pk_v = C.BW_GM_L1, C.BW_GM_UB
+    knee_c, knee_v = hbm / pk_c, hbm / pk_v
+    cyc_cu = C.read_aic(meta["cube_un"])["mte2"]   # uncapped cube cycles -> bw == 135 (peak)
+    cyc_vu = C.read_aiv(meta["vec_un"])["mte2"]     # uncapped vector cycles -> bw == 100.9
+    print(f"  HBM read pool={hbm:.0f} GiB/s.  cube peak={pk_c:.0f} (knee {knee_c:.1f} cores),"
+          f"  vector peak={pk_v:.1f} (knee {knee_v:.1f})")
+    print(f"  {'B':>3} | {'cubeGM->L1':>10} {'pred':>6} {'e%':>5} | {'vecGM->UB':>9} {'pred':>6} {'e%':>5}"
+          f" | {'900/B':>6} {'shared':>6}")
+    errs = []
+    for x in sorted(meta["sweep"], key=lambda r: r["B"]):
+        B = x["B"]
+        bw_c = pk_c * cyc_cu / C.read_aic(x["cube"])["mte2"]
+        bw_v = pk_v * cyc_vu / C.read_aiv(x["vec"])["mte2"]
+        prd_c, prd_v = min(pk_c, hbm / B), min(pk_v, hbm / B)
+        ec, ev = (bw_c - prd_c) / prd_c * 100, (bw_v - prd_v) / prd_v * 100
+        errs += [abs(ec), abs(ev)]
+        shared = "yes" if B >= knee_v and abs(bw_c - bw_v) / bw_v < 0.05 else "-"
+        print(f"  {B:>3} | {bw_c:>10.1f} {prd_c:>6.1f} {ec:>+4.1f}% | {bw_v:>9.1f} {prd_v:>6.1f} {ev:>+4.1f}%"
+              f" | {hbm / B:>6.1f} {shared:>6}")
+    cm = min(24 * pk_c, hbm) + min(24 * pk_v, hbm)   # mlsys26 independent per-unit caps at B=24
+    print(f"  -> both pipes match min(peak, 900/B) to {max(errs):.1f}% max; past the knees they")
+    print(f"     COLLAPSE to the shared 900/B (GroupTotal pools GM_TO_L1 + GM_TO_UB). So a mixed")
+    print(f"     cube+vector kernel reads at aggregate {hbm:.0f} GiB/s -- but the mlsys26 model caps")
+    print(f"     cube-feed and vector-io INDEPENDENTLY -> {cm:.0f} at B=24, a {cm / hbm:.1f}x overcount.")
+    print("  *** IMPLICATION: par() must divide ONE shared read pool by the TOTAL active readers")
+    print("      (cube + vector), not cap each unit at the full HBM. (Device-eval-pending on 900.)")
+
+
 ALL = {
     "gml1_reload": analyze_reload,
     "gml1_roofline": analyze_roofline,
@@ -296,4 +333,5 @@ ALL = {
     "gml1_fused": analyze_fused,
     "gml1_multicore": analyze_multicore,
     "gml1_decision": analyze_decision,
+    "gml1_contention": analyze_contention,
 }

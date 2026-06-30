@@ -52,6 +52,7 @@ takes the `max` over the DDR and compute pipes.
 | truly fused lowering (C resident in L1) hits the fused number | `gml1_fused` | `fused mte2 = reload(A,B,D)` to −0.0% (1–4 M-bands); C never TLOAD'd from GM; 40–44% reload saving |
 | multi-core `par(active,peak) = min(active, HBM/peak)` | `gml1_multicore` | uncapped `mte2·B` constant (linear); capped per-core bw = `min(135,900/B)` ≤0.4%; aggregate saturates at HBM past the knee |
 | decision quality: model argmin tile == sim-best tile | `gml1_decision` | GM→L1-only roofline 4.1% mean regret (ties transposes); + MTE1 tiebreaker → 0.0% |
+| HBM read contention: cube + vector share one read pool | `gml1_contention` | both match `min(peak,900/B)` to 0.0%; collapse to shared `900/B` past the knees; independent per-unit caps overcount a mixed kernel 2.0× |
 
 ### Where `max(feed, writes)` is optimistic [M]
 
@@ -173,14 +174,46 @@ needs the L0-level MTE1 term as a tiebreaker (or a full overlap-aware 4-pipe wal
 residual (~10–24% `total/max` on the chosen tile) is the unmodeled `dbC=1` drain
 serialization — the same corner `gml1_roofline` flagged.
 
+## HBM read contention — cube and vector share ONE pool [M] (`gml1_contention`)
+
+`gml1_multicore` validated the read cap for a single (cube) consumer. But on a mixed
+kernel, the cube cores (operand reload, MTE2 `GM→L1`) and the vector cores (load, MTE2
+`GM→UB`) hit the **same** HBM. The perf-sim models this exactly: `HillBandwidthModel::
+GroupTotal` maps **both** `GM_TO_L1` and `GM_TO_UB` onto one `total_read_gibs`, so
+`BwEff` throttles every read — cube or vector — to `total_read / ncores`.
+
+This experiment loads a fixed per-core byte volume on each pipe, sweeps the active core
+count `B`, and backs out each pipe's effective bandwidth as `peak · (uncapped_cyc /
+capped_cyc)` (a pure ratio — no byte counting):
+
+| B | cube `GM→L1` | vector `GM→UB` | `900/B` |
+| - | --- | --- | --- |
+| 4 | 135.0 (peak) | 100.9 (peak) | 225 — neither capped |
+| 8 | 112.5 | 100.9 | 112.5 — cube capped, vector not (knee 8.9) |
+| 16 | 56.2 | 56.3 | 56.2 — **both collapse to 900/B** |
+| 24 | 37.5 | 37.5 | 37.5 — **both collapse to 900/B** |
+
+Both pipes match `min(peak, 900/B)` to **0.0%**, and past the knees (cube 6.7, vector
+8.9) they converge to the **identical** `900/B` despite different peaks — the signature of
+one shared pool. So a mixed cube+vector kernel reads at aggregate **900 GiB/s**.
+
+**Implication for mlsys26.** The cost model caps cube-feed and vector-io
+**independently**, each at the full HBM (`par(active, bw_gm_l1)` and `par(active,
+bw_gm_ub)` are separate `min(active, hbm/peak)` calls). For a mixed kernel that charges
+`min(24·135, 900) + min(24·100.9, 900) = 1800` GiB/s — a **2.0× overcount** of the real
+shared 900. The fix is to divide **one** read pool by the **total** active readers
+(cube + vector): `bw_eff = min(peak, hbm / total_active_readers)`, i.e. the perf-sim's
+`GroupTotal` semantics. Device-eval-pending on the exact aggregate (900 is the estimate).
+
 ## Caveats
 
 - Output-stationary tiles. Coverage: split-K **sink** per-worker (`gml1_splitk`);
   chained-matmul reload accounting by decomposition (`gml1_chain`) **and** a truly fused
   multi-band lowering (`gml1_fused`, C resident in L1, `M/bm` bands); the multi-core
-  `par()` aggregate cap (`gml1_multicore`). Not yet exercised: split-K's `S·store`
-  **write**-side HBM contention (the `par()` validation here is on the GM **read** group),
-  and non-square / mixed-dtype operand combinations.
+  `par()` aggregate cap (`gml1_multicore`); cube+vector **read**-pool contention
+  (`gml1_contention`, the shared `total_read_gibs` group). Not yet exercised: the
+  **write**-side pool (`total_write_gibs`: split-K `S·store` + vector stores sharing
+  `L0C/UB→GM`), and non-square / mixed-dtype operand combinations.
 - The flat-vs-fitted gap is measured indirectly (the default build is flat); a
   `PTO_BW_MODE=fitted` sweep would measure the fitted curve directly.
 - `bytes_a = bytes_b = 2` (bf16) throughout; fp32 operands (`cpr=2`, `kt=8`) change
