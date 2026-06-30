@@ -145,9 +145,88 @@ def analyze_splitS():
     print("     cost error -- the split decision is built on the wrong reduction cost.)")
 
 
+def _effbw(byts, cycles):
+    return byts / (1024.0 ** 3) * C.FREQ_HZ / cycles if cycles else float("nan")
+
+
+def analyze_dma():
+    print("\n=== dma: GM<->UB shape penalty + the vector roofline overlap ===")
+    idx = _index("dma")
+    # (A) DMA-shape: fixed total bytes, sweep width W. Is the GM->UB cost shape-blind?
+    print("  (A) DMA-shape: fixed total bytes, sweep width W (H=total/W) -- is mte2 shape-blind?")
+    print(f"      {'W':>5} {'H':>5} | {'mte2':>8} {'eff_GiB/s':>9}")
+    bws = []
+    for x in sorted(idx["shape"], key=lambda r: r["w"]):
+        d = C.read_aiv(x["fid"])
+        byts = x["nld"] * x["h"] * x["w"] * 4
+        eff = _effbw(byts, d["mte2"])
+        bws.append(eff)
+        print(f"      {x['w']:>5} {x['h']:>5} | {d['mte2']:>8} {eff:>9.1f}")
+    spread = (max(bws) - min(bws)) / (sum(bws) / len(bws)) * 100 if bws else float("nan")
+    print(f"      -> eff GiB/s spread {spread:.1f}% across W (peak {C.BW_GM_UB}). The perf-sim charges")
+    print(f"         GM<->UB by TOTAL bytes (nBurst*lenBurst) -- it is SHAPE-BLIND, so mlsys26's DMA-")
+    print(f"         shape penalty (sub-burst widths cost more) is a real-HW effect the perf-sim")
+    print(f"         CANNOT validate. Keep it a device-eval reasoned bound, not perf-sim-grounded.")
+
+    # (B) roofline: does the VEC pipe overlap the GM<->UB DMA (total ~ max), or serialize (sum)?
+    print("  (B) roofline: load->compute->store loop -- total vs max(pipes) vs sum")
+    print(f"      {'NT':>3} | {'mte2':>6} {'vec':>6} {'mte3':>6} {'total':>7} | {'t/max':>5} {'t/sum':>5}")
+    tmaxes = []
+    for x in sorted(idx["rfl"], key=lambda r: r["nt"]):
+        d = C.read_aiv(x["fid"])
+        mx = max(d["mte2"], d["vec"], d["mte3"])
+        sm = d["mte2"] + d["vec"] + d["mte3"]
+        tmaxes.append(d["total"] / mx if mx else float("nan"))
+        print(f"      {x['nt']:>3} | {d['mte2']:>6} {d['vec']:>6} {d['mte3']:>6} {d['total']:>7} | "
+              f"{d['total'] / mx if mx else float('nan'):>5.2f} {d['total'] / sm if sm else float('nan'):>5.2f}")
+    print(f"      naive single-buffer: t/sum~1.00 (SERIALIZES -- buffer reuse forces a WAR wait).")
+    # (C) double-buffered: alternating buffers remove the WAR -> the DMA should overlap VEC.
+    print("  (C) software-pipelined (prefetch s+1 + SetFlag/WaitFlag): does the DMA overlap VEC?")
+    print(f"      {'NT':>3} | {'mte2':>6} {'vec':>6} {'mte3':>6} {'total':>7} | {'t/max':>5} {'t/sum':>5}")
+    dbmax, dbsum = [], []
+    for x in sorted(idx["db"], key=lambda r: r["nt"]):
+        d = C.read_aiv(x["fid"])
+        mx = max(d["mte2"], d["vec"], d["mte3"])
+        sm = d["mte2"] + d["vec"] + d["mte3"]
+        dbmax.append(d["total"] / mx if mx else float("nan"))
+        dbsum.append(d["total"] / sm if sm else float("nan"))
+        print(f"      {x['nt']:>3} | {d['mte2']:>6} {d['vec']:>6} {d['mte3']:>6} {d['total']:>7} | "
+              f"{d['total'] / mx if mx else float('nan'):>5.2f} {d['total'] / sm if sm else float('nan'):>5.2f}")
+    print(f"      -> t/sum drops 1.00 -> {min(dbsum):.2f}: software-pipelining OVERLAPS the GM<->UB DMA")
+    print(f"         with VEC (t/max -> {min(dbmax):.2f}, approaching 1 in steady state as NT grows). So")
+    print(f"         the max(compute,ddr) roofline IS achievable -- but ONLY with explicit SetFlag/")
+    print(f"         WaitFlag pipelining; naive code AND buffer-alternation alone serialize (t/sum=1).")
+    print(f"         mlsys26's max branch is right, conditioned on the emit software-pipelining (as")
+    print(f"         the cube gemm does, per gml1_roofline). Not automatic from tile size alone.")
+
+
+def analyze_fp16():
+    print("\n=== fp16: dtype scaling -- epr=128 (half), so repeat and reduce-K halve ===")
+    idx = _index("fp16")
+    print("  (A) pointwise (add, half): vec = 24 + 2*repeat, repeat = ROWS*COLS/128")
+    print(f"      {'repeat':>6} {'cols':>5} | {'sim_vec':>7} {'pred':>6} {'e%':>5}")
+    for x in sorted(idx["pw"], key=lambda r: r["repeat"]):
+        sim = C.read_aiv(x["fid"])["vec"]
+        pred = C.perfsim_chain_cycles(0, x["repeat"], 1)
+        err = (sim - pred) / pred * 100 if pred else float("nan")
+        print(f"      {x['repeat']:>6} {x['cols']:>5} | {sim:>7} {pred:>6.0f} {err:>+4.1f}%")
+    print("  (B) row-reduce (half): tree K = COLS/128 (vs /64 for fp32)")
+    print(f"      {'COLS':>5} {'K':>3} | {'sim_vec':>7} {'pred':>6} {'e%':>5}")
+    for x in sorted(idx["rd"], key=lambda r: r["cols"]):
+        sim = C.read_aiv(x["fid"])["vec"]
+        pred = C.perfsim_trowsum_cycles(x["cols"], bytes_t=2)  # half: epr=128
+        k = x["cols"] // 128
+        err = (sim - pred) / pred * 100 if pred else float("nan")
+        print(f"      {x['cols']:>5} {k:>3} | {sim:>7} {pred:>6.0f} {err:>+4.1f}%")
+    print("  -> confirms VecOpCompute's epr=vec_reg_bytes/dtype_bytes scaling: half halves the")
+    print("     repeat (pointwise) and the reduce tree depth K vs fp32 at the same shape.")
+
+
 ALL = {
     "vec_pointwise": analyze_pointwise,
     "vec_reduce": analyze_reduce,
     "vec_stream": analyze_stream,
     "vec_splitS": analyze_splitS,
+    "vec_dma": analyze_dma,
+    "vec_fp16": analyze_fp16,
 }

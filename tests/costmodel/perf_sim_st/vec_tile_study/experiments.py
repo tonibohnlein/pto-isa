@@ -249,9 +249,136 @@ def gen_splitS():
     return _save_index("splitS", dict(H=H, W=W, sweep=idx))
 
 
+# GM<->UB I/O. (A) DMA-shape: load a FIXED-byte tile at varying width W -- does the perf-sim
+# charge more for narrow (sub-burst) tiles, as the mlsys26 DMA-shape penalty assumes? (B)
+# roofline: a load -> compute -> store loop -- does the sim OVERLAP the VEC pipe with the
+# GM<->UB DMA (total ~ max), validating the max(compute,ddr) vector roofline, or serialize (sum)?
+_VEC_DMA_KERNEL = r"""
+// Pipe-sync wrappers (same as gemm_performance_kernel.cpp) -- set_flag/wait_flag are perf-sim
+// intrinsics; defined here so the self-contained vec_dma kernel can software-pipeline.
+template <pipe_t srcPipe, pipe_t dstPipe>
+AICORE inline void SetFlag(uint32_t id) { set_flag(srcPipe, dstPipe, static_cast<event_t>(id)); }
+template <pipe_t srcPipe, pipe_t dstPipe>
+AICORE inline void WaitFlag(uint32_t id) { wait_flag(srcPipe, dstPipe, static_cast<event_t>(id)); }
+template <typename T, int H, int W, int NLD>
+AICORE inline void DmaLoad(__gm__ T *src) {
+    using ShapeDyn  = pto::Shape<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
+    using StrideDyn = pto::Stride<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
+    using Global    = pto::GlobalTensor<T, ShapeDyn, StrideDyn, pto::Layout::ND>;
+    using VT = pto::Tile<pto::TileType::Vec, T, H, W, pto::BLayout::RowMajor, H, W>;
+    VT tile;
+    TASSIGN(tile, 0);
+    ShapeDyn  shape(1, 1, 1, H, W);
+    StrideDyn stride(H * W, H * W, H * W, W, 1);
+    for (int i = 0; i < NLD; ++i) { Global g(src, shape, stride); TLOAD(tile, g); }
+}
+template <typename T, int H, int W, int NT>
+AICORE inline void LoadComputeStore(__gm__ T *buf) {
+    using ShapeDyn  = pto::Shape<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
+    using StrideDyn = pto::Stride<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
+    using Global    = pto::GlobalTensor<T, ShapeDyn, StrideDyn, pto::Layout::ND>;
+    using VT = pto::Tile<pto::TileType::Vec, T, H, W, pto::BLayout::RowMajor, H, W>;
+    constexpr int nb = H * W * (int)sizeof(T);
+    VT a, b;
+    TASSIGN(a, 0);
+    TASSIGN(b, nb);
+    ShapeDyn  shape(1, 1, 1, H, W);
+    StrideDyn stride(H * W, H * W, H * W, W, 1);
+    for (int i = 0; i < NT; ++i) {
+        Global g(buf, shape, stride);
+        TLOAD(a, g);          // GM->UB (mte2)
+        TADD(b, a, a);        // VEC compute
+        TMUL(b, b, a);
+        TSTORE(g, b);         // UB->GM (mte3)
+    }
+}
+// Software-pipelined: PREFETCH tile s+1 (MTE2) before computing tile s (VEC), with per-buffer
+// flags so the next load overlaps this compute (a0/b0 vs a1/b1 ping-pong). This is what the
+// emit must do to hit the max(compute,ddr) roofline -- buffer alternation ALONE doesn't overlap
+// (the perf-sim sums program-order ops); the SetFlag/WaitFlag pipeline is what creates it.
+template <typename T, int H, int W, int NT>
+AICORE inline void Pipelined(__gm__ T *buf) {
+    using ShapeDyn  = pto::Shape<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
+    using StrideDyn = pto::Stride<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
+    using Global    = pto::GlobalTensor<T, ShapeDyn, StrideDyn, pto::Layout::ND>;
+    using VT = pto::Tile<pto::TileType::Vec, T, H, W, pto::BLayout::RowMajor, H, W>;
+    constexpr int nb = H * W * (int)sizeof(T);
+    VT a0, a1, b0, b1;
+    TASSIGN(a0, 0); TASSIGN(a1, nb); TASSIGN(b0, 2 * nb); TASSIGN(b1, 3 * nb);
+    ShapeDyn  shape(1, 1, 1, H, W);
+    StrideDyn stride(H * W, H * W, H * W, W, 1);
+    Global g0(buf, shape, stride);
+    TLOAD(a0, g0);                                   // prefetch tile 0
+    SetFlag<PIPE_MTE2, PIPE_V>(0);
+    for (int s = 0; s < NT; ++s) {
+        if (s + 1 < NT) {                            // prefetch tile s+1 -> overlaps this compute
+            Global gn(buf, shape, stride);
+            if ((s + 1) & 1) { TLOAD(a1, gn); SetFlag<PIPE_MTE2, PIPE_V>(1); }
+            else             { TLOAD(a0, gn); SetFlag<PIPE_MTE2, PIPE_V>(0); }
+        }
+        Global gs(buf, shape, stride);
+        if (s & 1) { WaitFlag<PIPE_MTE2, PIPE_V>(1); TADD(b1, a1, a1); TMUL(b1, b1, a1); TSTORE(gs, b1); }
+        else       { WaitFlag<PIPE_MTE2, PIPE_V>(0); TADD(b0, a0, a0); TMUL(b0, b0, a0); TSTORE(gs, b0); }
+    }
+}
+"""
+
+
+def gen_dma():
+    """vec_dma: (A) DMA-shape penalty (load cost vs width); (B) the vector roofline overlap."""
+    defs, fids = [_VEC_DMA_KERNEL], []
+    shape_idx, rfl_idx, db_idx = [], [], []
+    # (A) DMA-shape: fixed total elems (TOTAL), sweep width W (H = TOTAL/W). fp32.
+    total, nld = 4096, 32
+    for w in [16, 32, 64, 128, 256, 512]:
+        h = total // w
+        fid = f"dma_w{w}"
+        defs.append(f"void {fid}() {{ DmaLoad<float, {h}, {w}, {nld}>(nullptr); }}")
+        fids.append(fid)
+        shape_idx.append(dict(w=w, h=h, total=total, nld=nld, fid=fid))
+    # (B) roofline: load->compute->store loop; sweep NT (tiles) to expose overlap. [64,256] fp32.
+    for nt in [1, 2, 4, 8]:
+        fid = f"rf_n{nt}"
+        defs.append(f"void {fid}() {{ LoadComputeStore<float, 64, 256, {nt}>(nullptr); }}")
+        fids.append(fid)
+        rfl_idx.append(dict(nt=nt, h=64, w=256, fid=fid))
+    # (C) double-buffered: alternating buffers remove the WAR -> the DMA overlaps VEC. [64,128] fp32
+    # (4 tiles fit UB). Compare t/max (should -> ~1, overlap) vs the naive (B) which serializes.
+    for nt in [2, 4, 8]:
+        fid = f"db_n{nt}"
+        defs.append(f"void {fid}() {{ Pipelined<float, 64, 128, {nt}>(nullptr); }}")
+        fids.append(fid)
+        db_idx.append(dict(nt=nt, h=64, w=128, fid=fid))
+    C.write_testcase("vec_dma", defs, fids, "VecDma")
+    return _save_index("dma", dict(shape=shape_idx, rfl=rfl_idx, db=db_idx))
+
+
+def gen_fp16():
+    """vec_fp16: re-run a pointwise slope sweep + a row-reduce in HALF (epr=128, not 64) to
+    confirm the dtype scaling baked into VecOpCompute -- repeat (and the reduce tree K) halve.
+    """
+    defs, fids = [_VEC_CHAIN_KERNEL, _VEC_REDUCE_KERNEL], []
+    pw_idx, rd_idx = [], []
+    epr16 = C.VEC_REG_BYTES // 2   # half: 128 elements per repeat
+    for r in [1, 2, 4, 8]:         # repeat = ROWS*COLS/128; ROWS=1, COLS=128*r
+        fid = f"fp_add_r{r}"
+        defs.append(f"void {fid}() {{ VecChain<0, half, 1, {epr16 * r}, 1>(nullptr); }}")
+        fids.append(fid)
+        pw_idx.append(dict(op=0, repeat=r, cols=epr16 * r, fid=fid))
+    for cols in [128, 256, 512, 1024]:  # half row-reduce: K = cols/128
+        fid = f"fp_rs_c{cols}"
+        defs.append(f"void {fid}() {{ RowSum<half, 8, {cols}>(); }}")
+        fids.append(fid)
+        rd_idx.append(dict(cols=cols, fid=fid))
+    C.write_testcase("vec_fp16", defs, fids, "VecFp16")
+    return _save_index("fp16", dict(pw=pw_idx, rd=rd_idx, epr=epr16))
+
+
 ALL = {
     "vec_pointwise": gen_pointwise,
     "vec_reduce": gen_reduce,
     "vec_stream": gen_stream,
     "vec_splitS": gen_splitS,
+    "vec_dma": gen_dma,
+    "vec_fp16": gen_fp16,
 }

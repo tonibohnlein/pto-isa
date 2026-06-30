@@ -51,6 +51,8 @@ set(ALL_TESTCASES
     vec_reduce
     vec_stream
     vec_splitS
+    vec_dma
+    vec_fp16
     conv2d_perf_sim
     topk_perf_sim
     fa_perf_sim

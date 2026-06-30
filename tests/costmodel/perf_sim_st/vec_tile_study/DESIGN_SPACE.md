@@ -16,8 +16,9 @@ experiments that verify them. Sibling of `gm_l1_tile_study/DESIGN_SPACE.md`.
 | reduced-axis sink split-S | the cube split-K analog, sink-only | per-core reduce ✓; merge = S·[H,1] | `vec_splitS` [M] |
 | implicit streaming recompute | `N_passes = #reductions+1` (upper bound) | **✗ — 3–4× pessimistic** (real emit is online) | `vec_stream` [M] |
 | GM↔UB per-direction `par()` cap | `io/par(active, bw)` | read pool ✓ (`gml1_contention`) | — |
-| DMA-shape penalty (sub-burst width) | `max(1, burst/(w·dtype))` | — | _planned_ |
-| double-buffer floor (small-tile serialize) | `max(c,d)` iff `tile≥2·reg` | — | _planned_ |
+| DMA-shape penalty (sub-burst width) | `max(1, burst/(w·dtype))` | **perf-sim shape-blind — can't validate** (device-eval only) | `vec_dma` [M] |
+| double-buffer floor (`max` vs serialize) | `max(c,d)` iff `tile≥2·reg` | naive serializes (`t/sum=1`); software-pipelined overlaps (`t/sum→0.55`) — `max` needs `SetFlag/WaitFlag` | `vec_dma` [M] |
+| dtype scaling (`epr=reg/dtype_bytes`) | `repeat = elems/epr` | **✓** | `vec_fp16` [M] |
 
 ## What the perf-sim confirms (measured) [M]
 
@@ -29,6 +30,9 @@ experiments that verify them. Sibling of `gm_l1_tile_study/DESIGN_SPACE.md`.
 | reduce-W (`TROWSUM`) is **ROWS-independent** (count mode) | `vec_reduce` | sim flat at 96 over ROWS 8→64; mlsys26 (`repeat=ROWS·COLS/64`) overcounts up to **19×** |
 | UB-overflow streaming is **online** (~1 wide pass), not `#reductions+1` | `vec_stream` | online softmax wide body flat (≤1×) over NCHUNKS 1→8; mlsys26's `3×` is 3–4× over |
 | reduced-axis split-S: per-core reduce ∝ `Wc`, merge = `S·[H,1]` | `vec_splitS` | per-core 366→51 (S 1→8) to 0.0%; `[H,1]` store a 3-cycle floor; merge `S·store` |
+| GM↔UB cost is shape-blind (no sub-burst-width penalty) | `vec_dma` | `mte2` flat at 8928 / 101 GiB/s over W 16→512 (0.0% spread) — the perf-sim charges by total bytes |
+| roofline: naive serializes, software-pipelined overlaps | `vec_dma` | naive `t/sum=1.00`; pipelined (`SetFlag/WaitFlag` prefetch) `t/sum→0.55`, `t/max→1.36` |
+| dtype scaling `epr=reg/dtype_bytes` | `vec_fp16` | half (`epr=128`) halves `repeat` + reduce-`K`; pointwise & reduce match to 0.0% |
 
 ## vec_pointwise — the per-op formula + chain accounting [M]
 
@@ -122,6 +126,29 @@ reduction cost that's already up to 19× off. Fix the reduction cost first, then
 `32×256`, `64×128` — the reduce takes a faster `vcgadd` `TryOptimizeFP32Reduce` path, ~2.5×
 cheaper than the generic tree; `vec_splitS` avoids those shapes so the per-core trend is clean.)
 
+## vec_dma — GM↔UB I/O: shape penalty + roofline overlap [M]
+
+Two GM↔UB terms in the vector roofline were "reasoned bounds, not measured" — `vec_dma`
+grounds both, and the answer for each is "the perf-sim is coarser than mlsys26 / real HW":
+
+- **DMA-shape penalty.** Loading a fixed-byte tile at widths W = 16→512 gives the **same
+  `mte2` (8928, 101 GiB/s, 0.0% spread)** — the perf-sim charges GM↔UB by `nBurst·lenBurst` =
+  total bytes, **shape-blind**. So mlsys26's `max(1, vec_reg_bytes/(w·dtype))` (sub-burst
+  widths cost more) is a real-HW effect the perf-sim **cannot validate**; keep it a
+  **device-eval reasoned bound**, not perf-sim-grounded. (The model isn't wrong — the
+  perf-sim just can't confirm or refute it.)
+- **Roofline overlap.** A naive single-buffer `load→compute→store` loop has `t/sum = 1.00`
+  exactly — it **serializes**. A **software-pipelined** kernel (prefetch tile s+1 with
+  `SetFlag/WaitFlag` while computing tile s) **overlaps** the GM↔UB DMA with VEC: `t/sum`
+  drops 1.00 → **0.55**, `t/max` → 1.36 (approaching 1 in steady state). So the
+  `max(compute, ddr)` roofline **is** achievable — but *only* with explicit pipelining;
+  buffer-alternation alone is **not** enough (the perf-sim sums program-order ops). mlsys26's
+  `tile ≥ 2·vec_reg_bytes ⇒ max` is the right *shape*, **conditioned on the emit software-
+  pipelining** (as the cube gemm does, per `gml1_roofline`) — not automatic from tile size.
+
+**`vec_fp16`** closes the dtype assumption: half (`epr = 256/2 = 128`) halves the pointwise
+`repeat` and the reduce tree `K`; both match `VecOpCompute` to **0.0%**.
+
 ## The vector cost model — grounded fixes for mlsys26
 
 All four experiments point one way: **the mlsys26 vector model is systematically
@@ -149,8 +176,12 @@ evaluation, same as the cube-side HBM-900.
 
 ## Next experiments
 
-- **`vec_dma`** — GM↔UB I/O: the DMA-shape penalty (sub-burst width) + the double-buffer
-  serialization floor, on the `mte2_aiv`/`mte3` pipes.
+The single-core vector model is now comprehensively grounded (compute, reductions,
+streaming, split, GM↔UB I/O + the roofline overlap, dtype). The one remaining piece is
+separate:
+
+- **Mixed cube+vector** — the `sat≈1` DDR wall + cube↔vector HBM contention (the M1/M2/M3
+  plan). A separate `mixed_*` study, not a `vec_tile_study` expansion.
 
 ## Caveats
 

@@ -59,6 +59,8 @@ Device-calibrated coefficients (`cce_costmodel_vector_compute.hpp`), as `(slope,
 | **vec_reduce** | reductions are barrier-separated **trees**, not a single `slope·repeat` op | `TROWSUM` (reduce W) = `45·(COLS/64)+6` — **ROWS-independent**; `TCOLSUM` (reduce H) = `16(R-1)+30·log₂R` — both to **0.0%**. mlsys26's `repeat=ROWS·COLS/64` overcounts a tall-tile `TROWSUM` up to **19×** |
 | **vec_stream** | UB-overflow streaming recompute factor (`N_passes`) | online-streamed softmax wide body is **flat (≤1×)** across NCHUNKS 1→8 (`exp` runs once per element); mlsys26's `#reductions+1 = 3×` multiplier is **3–4× pessimistic** on every streamed softmax |
 | **vec_splitS** | reduced-axis cross-core split (cube split-K analog) | per-core reduce drops ∝ `Wc=W/S` (366→51, S 1→8, to **0.0%**); the `[H,1]` partial store is a **constant 3-cycle floor**; merge = `S·store` grows — the compute(~1/S)-vs-merge(~S) tradeoff (`eval_reduce_S`) |
+| **vec_dma** | GM↔UB DMA-shape penalty + the vector roofline overlap | the perf-sim is **shape-blind** (GM↔UB charged by total bytes, 0.0% spread over width) — the DMA-shape penalty is unvalidatable, device-eval only; a naive load→compute→store **serializes** (`t/sum=1.00`), a **software-pipelined** one **overlaps** (`t/sum→0.55`, `t/max→1.36`) — the `max(compute,ddr)` roofline holds only with `SetFlag/WaitFlag` pipelining |
+| **vec_fp16** | dtype scaling (`epr=vec_reg_bytes/dtype_bytes`) | half (`epr=128`) halves the pointwise `repeat` and the reduce tree `K` — both match to **0.0%**, confirming `VecOpCompute`'s dtype handling |
 
 ## How mlsys26 diverges (the grounding gaps this study targets)
 
