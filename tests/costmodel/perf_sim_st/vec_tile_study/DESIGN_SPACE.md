@@ -11,8 +11,8 @@ experiments that verify them. Sibling of `gm_l1_tile_study/DESIGN_SPACE.md`.
 | per-op compute `slope·repeat + startup` | `head+slope·repeat+tail` per op | **form ✓, accounting ✗** | `vec_pointwise` [M] |
 | per-op slope diversity | single `slope_pw=2` | ✗ (div=4, cheap=1) | `vec_pointwise` [M] |
 | once-per-stream startup | per-op head+tail | ✗ (overcounts chains) | `vec_pointwise` [M] |
-| count-mode floor (+16) | not modeled | ✗ | _planned_ |
-| reduction slope (`vreducev2`) | `slope_reduce=14` | matches stub (stub itself uncalibrated) | _planned_ `vec_reduce` |
+| count-mode floor (+16) | not modeled | ✗ | `vec_reduce` [M] (reductions run in count mode) |
+| reduction cost | `head+slope_reduce·repeat+tail`, `repeat=ROWS·COLS/64` | **✗ — structurally wrong** (a tree, not one op; reduce W is ROWS-independent) | `vec_reduce` [M] |
 | reduced-axis sink split-S | the cube split-K analog, sink-only | — | _planned_ `vec_splitS` |
 | implicit streaming recompute | `N_passes = #reductions+1` (upper bound) | ✗ | _planned_ `vec_stream` |
 | GM↔UB per-direction `par()` cap | `io/par(active, bw)` | read pool ✓ (`gml1_contention`) | — |
@@ -25,6 +25,8 @@ experiments that verify them. Sibling of `gm_l1_tile_study/DESIGN_SPACE.md`.
 | --- | --- | --- |
 | vector op = `slope·repeat + head+tail` (isolated) | `vec_pointwise` | slope & startup match the device stub to **0.0%** (add 2/24, mul 2/25, div 4/30, exp 2/31) |
 | startup paid **once per stream**, not per op | `vec_pointwise` | `vec = head+tail + NOPS·slope·repeat` to 0.0%; mlsys26's per-op charge overcounts **1.2×→2.7×** (NOPS 1→16) |
+| a reduction is a barrier-separated **tree**, not one op | `vec_reduce` | `TROWSUM = 45·(COLS/64)+6`, `TCOLSUM = 16(R-1)+30·log₂R`, both to **0.0%** |
+| reduce-W (`TROWSUM`) is **ROWS-independent** (count mode) | `vec_reduce` | sim flat at 96 over ROWS 8→64; mlsys26 (`repeat=ROWS·COLS/64`) overcounts up to **19×** |
 
 ## vec_pointwise — the per-op formula + chain accounting [M]
 
@@ -45,10 +47,30 @@ UB stream) is overcosted by `~(NOPS-1)·(head+tail)`. The fix is to charge the c
 startup **once** (`total = startup + Σ slope·repeat`), not per op — and to use the
 per-op slope (`vdiv`=4, `vmuls/vrelu`=1) rather than a single `slope_pw=2`.
 
+## vec_reduce — a reduction is a barrier-separated tree, not one op [M]
+
+`TROWSUM` (reduce W, `[H,W]→[H,1]`) lowers to a binary tree of `vadd` passes + a final
+`vcadd`, **each separated by `pipe_barrier(PIPE_V)`** — which flushes the VEC queue
+(`trace.hpp` `queue.clear()`), so every pass re-pays `head+tail`. The passes run in
+**count mode** (`repeat=0`), so `slope·repeat` vanishes and the cost is pure per-pass
+startup. Measured == predicted to 0.0%:
+
+| | formula | scales with | mlsys26 overcount |
+| --- | --- | --- | --- |
+| `TROWSUM` (reduce W) | `45·(COLS/64) + 6` | **COLS only** (ROWS-independent) | 2.5× → **19× on tall tiles** |
+| `TCOLSUM` (reduce H, binary) | `16(R-1) + 30·log₂R` | **ROWS** (the reduced dim) | 1.3–1.5× |
+
+**Implication for mlsys26.** The reduction model — one op, `head + slope_reduce·repeat +
+tail` with `repeat = ROWS·COLS/64` — is **structurally wrong**. The real cost scales with
+the **reduced dimension's tree**, not `ROWS·COLS`: reducing W is ROWS-independent (so a
+`[64,128]` row-reduce is overcounted 19×), reducing H scales with H. The fix is to cost a
+reduction by its reduced axis (`~k·(W/64)` for a row-reduce, `~k'·H` for a col-reduce),
+not the product. **Caveat:** the perf-sim's count-mode flat-per-pass is itself coarse vs
+real HW (a count-mode op over more rows *does* cost more on device) — flag for the device
+eval; here it is the measured ground truth the analytic model must match.
+
 ## Next experiments
 
-- **`vec_reduce`** — `vreducev2`/`vcadd` slope (14/7) + the row vs col reduced axis. Note
-  `vreducev2` is the one op *not* device-calibrated in the stub, so measure it directly.
 - **`vec_splitS`** — the sink-only reduced-axis cross-core split (the cube split-K analog):
   S partials, the thin `[H,1]`/`[1,W]` atomic-add store folded into the roofline.
 - **`vec_stream`** — UB-overflow streaming: is the real recompute cost `#reductions+1`

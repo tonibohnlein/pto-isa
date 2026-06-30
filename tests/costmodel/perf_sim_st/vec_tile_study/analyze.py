@@ -59,6 +59,52 @@ def analyze_pointwise():
     print("     cheap ops=1) vs mlsys26's single slope=2. *** grounding gap for the vector model.")
 
 
+def analyze_reduce():
+    print("\n=== reduce: TROWSUM/TCOLSUM are barrier-separated trees, not a single slope*repeat ===")
+    idx = _index("reduce")
+
+    # (A) TROWSUM: cost vs the reduced dim COLS (fixed ROWS) -- linear in COLS/64 (tree depth)
+    r0 = idx["rs_cols"][0]["rows"]
+    print(f"  (A) TROWSUM COLS sweep (ROWS={r0}): vec_cycles ~ 45*(COLS/64) + 6 (the vadd tree)")
+    print(f"      {'COLS':>5} {'K':>3} | {'sim_vec':>7} {'pred':>6} {'e%':>5} | {'mlsys26':>7} {'over':>5}")
+    for x in sorted(idx["rs_cols"], key=lambda r: r["cols"]):
+        sim = C.read_aiv(x["fid"])["vec"]
+        k = x["cols"] // (C.VEC_REG_BYTES // 4)
+        pred = C.perfsim_trowsum_cycles(x["cols"])
+        mly = C.mlsys_reduce_cycles(x["rows"], x["cols"])
+        err = (sim - pred) / pred * 100 if pred else float("nan")
+        print(f"      {x['cols']:>5} {k:>3} | {sim:>7} {pred:>6.0f} {err:>+4.1f}% | "
+              f"{mly:>7.0f} {mly / sim:>4.1f}x")
+
+    # (B) TROWSUM: cost vs ROWS (fixed COLS) -- the headline: count-mode -> ROWS-INDEPENDENT
+    c0 = idx["rs_rows"][0]["cols"]
+    print(f"  (B) TROWSUM ROWS sweep (COLS={c0}): sim is FLAT (count-mode, ROWS-independent);")
+    print(f"      mlsys26's repeat = ROWS*COLS/64 grows with ROWS -> blows up on tall tiles.")
+    print(f"      {'ROWS':>5} | {'sim_vec':>7} {'pred':>6} | {'mlsys26':>7} {'over':>5}")
+    for x in sorted(idx["rs_rows"], key=lambda r: r["rows"]):
+        sim = C.read_aiv(x["fid"])["vec"]
+        pred = C.perfsim_trowsum_cycles(x["cols"])
+        mly = C.mlsys_reduce_cycles(x["rows"], x["cols"])
+        print(f"      {x['rows']:>5} | {sim:>7} {pred:>6.0f} | {mly:>7.0f} {mly / sim:>4.1f}x")
+
+    # (C) TCOLSUM binary: pairwise vadd tree across rows (reduce H) -- scales with ROWS
+    print("  (C) TCOLSUM binary ROWS sweep (COLS=128): vadd tree across rows ~ 16(R-1)+30*log2(R)")
+    print(f"      {'ROWS':>5} | {'sim_vec':>7} {'pred':>6} {'e%':>5} | {'mlsys26':>7} {'over':>5}")
+    for x in sorted(idx["cs_rows"], key=lambda r: r["rows"]):
+        sim = C.read_aiv(x["fid"])["vec"]
+        pred = C.perfsim_tcolsum_cycles(x["rows"])
+        mly = C.mlsys_reduce_cycles(x["rows"], x["cols"])
+        err = (sim - pred) / pred * 100 if pred else float("nan")
+        print(f"      {x['rows']:>5} | {sim:>7} {pred:>6.0f} {err:>+4.1f}% | {mly:>7.0f} {mly / sim:>4.1f}x")
+
+    print("  -> a reduction is a TREE of barrier-isolated count-mode passes (each re-pays head+")
+    print("     tail), NOT one slope_reduce*repeat op. TROWSUM is ROWS-INDEPENDENT (count mode")
+    print("     zeroes the repeat) and linear in COLS/64; mlsys26's repeat=ROWS*COLS/64 is")
+    print("     structurally wrong (wrong ROWS scaling + magnitude). *** grounding gap. (NOTE: the")
+    print("     perf-sim's count-mode flat-per-pass is itself coarse vs real HW -- flag for device.)")
+
+
 ALL = {
     "vec_pointwise": analyze_pointwise,
+    "vec_reduce": analyze_reduce,
 }

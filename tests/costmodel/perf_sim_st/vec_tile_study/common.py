@@ -77,6 +77,43 @@ def mlsys_chain_cycles(repeat, nops, slope=MLSYS_SLOPE_PW):
     return nops * (MLSYS_HEAD + slope * repeat + MLSYS_TAIL)
 
 
+def mlsys_reduce_cycles(rows, cols, bytes_t=4):
+    """mlsys26 charges a reduction as ONE op: head + slope_reduce*repeat + tail, with
+    repeat = rows*cols / (256/bytes_t). So it grows with BOTH rows and cols.
+    """
+    return MLSYS_HEAD + MLSYS_SLOPE_REDUCE * repeat_for(rows, cols, bytes_t) + MLSYS_TAIL
+
+
+# Per-op pieces of a barrier-isolated reduction pass (count-mode -> repeat=0, so slope*repeat
+# vanishes): each pass = mask wraps + the op (head+tail [+count floor]) + pipe_barrier, and the
+# barrier resets the VEC queue so EVERY pass re-pays startup. From cce_costmodel_vector_compute
+# (vadd head+tail=24, vcadd head+tail=46) + EstimateCountModeFloor=16 + const mask/barrier cycles.
+VADD_PASS = 24 + COUNT_MODE_FLOOR + 5    # count-mode vadd (40) + 5 const (mask*2/norm/mask/barrier)
+VCADD_PASS = 46 + 5                      # final cross-lane vcadd block
+
+
+def perfsim_trowsum_cycles(cols, bytes_t=4):
+    """Predicted perf-sim TROWSUM cost: a binary tree of K-1 barrier-isolated count-mode vadd
+    passes + a final vcadd, K = cols/(256/bytes_t). COUNT mode forces repeat=0, so the cost is
+    ROWS-INDEPENDENT and ~linear in K -- structurally unlike mlsys26's slope_reduce*rows*cols.
+    """
+    epr = VEC_REG_BYTES // bytes_t
+    k = cols // epr
+    return VCADD_PASS if k < 2 else VADD_PASS * (k - 1) + VCADD_PASS
+
+
+def perfsim_tcolsum_cycles(rows):
+    """Predicted perf-sim TCOLSUM (binary) cost: the pairwise vadd tree across rows STREAMS
+    within each level (one barrier per level), so only log2(R) startups are paid:
+    ~16*(R-1) streamed count-mode vadds + 30*log2(R) per-level startup. Scales with the
+    REDUCED dim ROWS -- unlike TROWSUM (reduce W) which is ROWS-independent. (R a power of 2.)
+    """
+    if rows < 2:
+        return 0
+    levels = rows.bit_length() - 1   # log2(R) for powers of 2
+    return 16 * (rows - 1) + 30 * levels
+
+
 def transfer_cycles(byts, bw_gibs):
     """Perf-sim memory-pipe busy cycles for `byts` at `bw_gibs` GiB/s (flat model).
     Mirrors EstimateBandwidthCycles: bytes / 2**30 / bw * freq_hz.

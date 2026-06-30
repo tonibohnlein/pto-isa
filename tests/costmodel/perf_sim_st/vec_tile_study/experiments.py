@@ -83,6 +83,74 @@ def gen_pointwise():
                                          chain_op=0, chain_repeat=chain_repeat))
 
 
+# Reductions. TROWSUM ([H,W]->[H,1], reduce W) lowers to a tree of count-mode vadd passes +
+# a final vcadd, EACH separated by pipe_barrier(PIPE_V) -- which resets the VEC queue, so every
+# pass re-pays head+tail. Count mode forces repeat=0 -> cost is ROWS-independent, linear in
+# COLS/64. TCOLSUM ([H,W]->[1,W], reduce H, binary) is a pairwise vadd tree across rows.
+_VEC_REDUCE_KERNEL = r"""
+// Mirror the ST trowsum/tcolsum tests: full [ROWS,COLS] template (aligned Cols) with
+// DYNAMIC valid dims (-1,-1) + runtime ctor giving each tile its real valid shape. No
+// TLOAD -- the cost model is data-agnostic, so TASSIGN + the reduce op is enough.
+template <typename T, int ROWS, int COLS>
+AICORE inline void RowSum() {
+    using TD = pto::Tile<pto::TileType::Vec, T, ROWS, COLS, pto::BLayout::RowMajor, -1, -1>;
+    constexpr int nbytes = ROWS * COLS * (int)sizeof(T);
+    TD src(ROWS, COLS), tmp(ROWS, COLS), dst(ROWS, COLS);
+    TASSIGN(src, 0);
+    TASSIGN(tmp, nbytes);
+    TASSIGN(dst, 2 * nbytes);
+    TROWSUM(dst, src, tmp);          // [ROWS,COLS] -> [ROWS,1] (reduce W)
+}
+template <typename T, int ROWS, int COLS>
+AICORE inline void ColSumBin() {
+    using TD = pto::Tile<pto::TileType::Vec, T, ROWS, COLS, pto::BLayout::RowMajor, -1, -1>;
+    constexpr int nbytes = ROWS * COLS * (int)sizeof(T);
+    TD src(ROWS, COLS), tmp((ROWS / 2 > 0 ? ROWS / 2 : 1), COLS), dst(1, COLS);
+    TASSIGN(src, 0);
+    TASSIGN(tmp, nbytes);
+    TASSIGN(dst, 2 * nbytes);
+    TCOLSUM(dst, src, tmp, true);    // [ROWS,COLS] -> [1,COLS] (reduce H, binary tree)
+}
+"""
+
+
+def gen_reduce():
+    """vec_reduce: ground the reduction cost vs mlsys26's lumped slope_reduce*repeat.
+
+    (A) TROWSUM COLS sweep (ROWS fixed): cost ~ linear in COLS/64 (tree depth).
+    (B) TROWSUM ROWS sweep (COLS fixed): cost ~ CONSTANT (count-mode -> ROWS-independent),
+        the headline gap vs mlsys26's repeat = ROWS*COLS.
+    (C) TCOLSUM binary ROWS sweep: pairwise vadd tree across rows.
+    """
+    defs, fids = [_VEC_REDUCE_KERNEL], []
+    rs_cols, rs_rows = [], []
+    cs_rows = []
+
+    def emit(fid, call):
+        defs.append(f"void {fid}() {{ {call} }}")
+        fids.append(fid)
+
+    # (A) TROWSUM: fixed ROWS=8, sweep the reduced dim COLS (UB: 3 x ROWS*COLS*4 bytes)
+    for cols in [64, 128, 256, 512, 1024]:
+        fid = f"rs_c{cols}"
+        emit(fid, f"RowSum<float, 8, {cols}>();")
+        rs_cols.append(dict(rows=8, cols=cols, fid=fid))
+    # (B) TROWSUM: fixed COLS=128, sweep ROWS -> should be FLAT (count-mode, ROWS-independent)
+    for rows in [8, 16, 32, 64]:
+        fid = f"rs_r{rows}"
+        emit(fid, f"RowSum<float, {rows}, 128>();")
+        rs_rows.append(dict(rows=rows, cols=128, fid=fid))
+    # (C) TCOLSUM binary: fixed COLS=128, sweep the reduced dim ROWS (powers of 2)
+    for rows in [2, 4, 8, 16, 32, 64]:
+        fid = f"cs_r{rows}"
+        emit(fid, f"ColSumBin<float, {rows}, 128>();")
+        cs_rows.append(dict(rows=rows, cols=128, fid=fid))
+
+    C.write_testcase("vec_reduce", defs, fids, "VecReduce")
+    return _save_index("reduce", dict(rs_cols=rs_cols, rs_rows=rs_rows, cs_rows=cs_rows))
+
+
 ALL = {
     "vec_pointwise": gen_pointwise,
+    "vec_reduce": gen_reduce,
 }
