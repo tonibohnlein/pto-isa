@@ -31,11 +31,13 @@ def _save_index(name, index):
 
 # ── inline mixed kernels (cube tile via RunGemmE2E + vector epilogue + the two schedules) ──
 _MIXED_KERNEL = r"""
-// One [BM,N] output tile = A_block @ B  (fp16 in, fp32 acc), via the proven single-tile gemm.
-template <int BM, int K, int N>
+// One [BM,N] output tile = A_block @ B  (fp16 in, fp32 acc), via the proven gemm kernel.
+// baseK = BK (= min(K,128)) keeps the L0A/L0B ping-pong <= 32 KiB; singleCoreK = K, so the cube
+// runs a kLoop = K/BK accumulate loop for K > 128. BK defaults to min(K,128) at the call sites.
+template <int BM, int K, int N, int BK>
 AICORE inline void CubeTile(__gm__ float *out, __gm__ half *a, __gm__ half *b) {
     RunGemmE2E<float, half, half, float, /*blockDim=*/1,
-               BM, K, N, BM, K, N, BM, K, N, BM, K, N, 1, 1, 1, 1>(out, a, b);
+               BM, K, N, BM, K, N, BM, K, N, BM, BK, N, 1, 1, 1, 1>(out, a, b);
 }
 
 // In-place pointwise epilogue over the [BM,N] handoff tile: load GM->UB, op, store UB->GM. The
@@ -62,13 +64,13 @@ AICORE inline void VectorTile(__gm__ float *cbuf, std::size_t ub_off) {
 // the OTHER of two GM buffers while the vector consumes tile k from THIS buffer. cube(k+1) and
 // vector(k) touch different buffers -> no dep -> the two units overlap. The per-tile RAW (vector
 // reads the cube's buffer) is hidden one tile deep. NTILES=1 degenerates to a single serial tile.
-template <int OP, int BM, int K, int N, int NTILES>
+template <int OP, int BM, int K, int N, int NTILES, int BK = (K < 128 ? K : 128)>
 AICORE inline void MixedOverlap(__gm__ half *A, __gm__ half *B, __gm__ float *buf0, __gm__ float *buf1) {
     __gm__ float *buf[2] = {buf0, buf1};
-    CubeTile<BM, K, N>(buf[0], A, B);                                  // prologue: produce tile 0
+    CubeTile<BM, K, N, BK>(buf[0], A, B);                                  // prologue: produce tile 0
     for (int k = 0; k < NTILES; ++k) {
         if (k + 1 < NTILES) {
-            CubeTile<BM, K, N>(buf[(k + 1) & 1], A + (k + 1) * BM * K, B);  // produce tile k+1 (other buffer)
+            CubeTile<BM, K, N, BK>(buf[(k + 1) & 1], A + (k + 1) * BM * K, B);  // produce tile k+1 (other buffer)
         }
         VectorTile<OP, BM, N>(buf[k & 1], 0x100000);                       // consume tile k (this buffer)
     }
@@ -78,12 +80,12 @@ AICORE inline void MixedOverlap(__gm__ half *A, __gm__ half *B, __gm__ float *bu
 // buffer the prior vector wrote) -> a tracked RAW edge -> cube(k) cannot start until vector(k-1)
 // finishes. vector(k) then waits cube(k) (RAW on H). The chain cube(0)->vec(0)->cube(1)->...
 // is fully serialized: total ~= NTILES*(cube + vec).
-template <int OP, int BM, int K, int N, int NTILES>
+template <int OP, int BM, int K, int N, int NTILES, int BK = (K < 128 ? K : 128)>
 AICORE inline void MixedSerial(__gm__ half *A, __gm__ half *B, __gm__ float *H) {
     for (int k = 0; k < NTILES; ++k) {
         __gm__ half *bk = (k == 0) ? B : reinterpret_cast<__gm__ half *>(H);  // chain B<-H for k>=1
-        CubeTile<BM, K, N>(H, A + k * BM * K, bk);   // k>=1: the B-load on H waits vector(k-1)
-        VectorTile<OP, BM, N>(H, 0x100000);          // reads H -> waits cube(k)
+        CubeTile<BM, K, N, BK>(H, A + k * BM * K, bk);   // k>=1: the B-load on H waits vector(k-1)
+        VectorTile<OP, BM, N>(H, 0x100000);              // reads H -> waits cube(k)
     }
 }
 """
@@ -154,7 +156,37 @@ def gen_serial():
     return _save_index("mixed_serial", dict(sweep=idx))
 
 
+# ── mixed_ddr_bound: sweep the AIC bottleneck across the GM<->compute boundary ──
+# Reuses the SKEWED MixedOverlap kernel at fixed bm=128, NT=8 (fill amortized), sweeping K. The
+# cube MAD (cube pipe) ~ bm*N*K grows with K; the fixp store (L0C->GM) ~ bm*N is CONSTANT in K;
+# the mte2_aic reload (GM->L1, A+B per tile) ~ K*(bm+N) grows with K. So small K is store/GM-bound
+# (fixp dominates the AIC) and large K shifts the AIC's dominant pipe toward MAD/reload. The point:
+# the per-unit ACTIVE wall already SUBSUMES all the GM ports (it is the overlapped critical path
+# through them), so total = max(cube_stage, vec_stage) + fill holds across the whole sweep with NO
+# separate `ddr` max term. C=C+C keeps the AIV stage cheap-compute -> GM-bound (load+store).
+_DDR_NTILES = 8
+_DDR_BM = 128
+_DDR_K = [16, 32, 64, 128, 256, 512]
+_DDR_N = [128, 256]
+
+
+def gen_ddr_bound():
+    """mixed_ddr_bound: skewed kernel, K sweep at bm=128/NT=8 (+ N in {128,256}). Show the AIC
+    dominant pipe shift (gm/store -> reload/MAD) while total stays = max(stage)+fill (ddr subsumed).
+    """
+    defs, fids, idx = [_MIXED_KERNEL], [], []
+    for n in _DDR_N:
+        for k in _DDR_K:
+            fid = f"md_n{n}_k{k}"
+            defs.append(_overlap_fid(fid, _OP_ADD, _DDR_BM, k, n, _DDR_NTILES))
+            fids.append(fid)
+            idx.append(dict(bm=_DDR_BM, K=k, N=n, ntiles=_DDR_NTILES, op=_OP_ADD, fid=fid))
+    C.write_testcase("mixed_ddr_bound", defs, fids, "MixedDdrBound")
+    return _save_index("mixed_ddr_bound", dict(sweep=idx))
+
+
 ALL = {
     "mixed_overlap": gen_overlap,
     "mixed_serial": gen_serial,
+    "mixed_ddr_bound": gen_ddr_bound,
 }

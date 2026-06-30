@@ -69,6 +69,7 @@ sweeping `NTILES ∈ {1,2,4,8}`:
 | --- | --- | --- |
 | **mixed_overlap** | skewed ping-pong: cube(k+1) ∥ vector(k) on alternating GM buffers | `total = max(cube, vec) + fill`; **fill = exactly one cube tile** (amortizes 58%→18%); `overlap_factor` 0→0.84 |
 | **mixed_serial** | per-tile RAW chain: cube(k) takes its B-operand from the handoff buffer the prior vector wrote, so it waits vector(k−1) | `total = the sum, and EXCEEDS it` (1.0→1.34×) — isolating each tile also kills intra-AIC cross-tile pipelining |
+| **mixed_ddr_bound** | the skewed kernel, sweeping K 16→512 (cube MAD grows; the `C=C+C` GM stages don't) | `total = max(cube, vec) + fill` holds across the *whole* compute↔GM-bound sweep; the **`ddr` is subsumed** into the stages (`max(cube,vec,ddr) == max(cube,vec)`), never a separate term. Bottleneck stage flips vec→cube at K≈128 |
 
 Measured (bm=128, N=128, K=128, fp16 in / fp32 acc, `C = C + C` epilogue):
 

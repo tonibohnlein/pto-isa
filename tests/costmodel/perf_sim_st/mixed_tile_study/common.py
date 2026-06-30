@@ -97,14 +97,26 @@ def vec_stage_cycles(M, N, nops, op_slope=2, op_ht=24, bytes_t=4):
 
 
 def ddr_cycles(M, N, K, bm, bn, bytes_a=2, bytes_t=4):
-    """The GM round-trip the compute must hide behind: cube store (L0C->GM) + vector reload
-    (GM->UB) + vector store (UB->GM). The handoff buffer is written once, read once.
+    """Single-core GM critical contribution = MAX over the four GM ports (NOT a sum):
+      mte2_aic  cube reload GM->L1 : (A=M*K + B reloaded per tile=(M/bm)*K*N) * bytes_a / BW_GM_L1
+      fixp      cube store L0C->GM : M*N * bytes_a / BW_L0C_GM  (perf-sim charges 2 bytes/elem here)
+      mte2_aiv  vector reload GM->UB: M*N * bytes_t / BW_GM_UB  (full tile -- AIV is not split)
+      mte3      vector store UB->GM : M*N * bytes_t / BW_UB_GM
+
+    IMPORTANT: this single-core GM cost is SUBSUMED into cube_stage / vec_stage. The perf-sim's
+    per-unit ACTIVE wall is the overlapped critical path through that unit's pipes (incl. these GM
+    ports), so each port time is <= the stage that contains it -> max(cube,vec,ddr)=max(cube,vec).
+    The OLD version SUMMED cube_store+vec_load+vec_store -- wrong twice: those ports overlap each
+    other AND already sit inside the stages, so the sum over-read `ddr` past the real bottleneck.
+    The mlsys26 `ddr_lat` term is only meaningful as the CROSS-UNIT shared-HBM-read contention
+    (PTO_BW_MODE=fitted), which the flat model cannot express -- to be grounded separately.
     """
-    per_core = (M * N) // VEC_CORES_PER_AIC
-    cube_store = transfer_cycles(M * N * 4, BW_L0C_GM)
-    vec_load = transfer_cycles(per_core * bytes_t, BW_GM_UB)
-    vec_store = transfer_cycles(per_core * bytes_t, BW_UB_GM)
-    return cube_store + vec_load + vec_store
+    ntiles = M // bm
+    mte2_aic = transfer_cycles((M * K + ntiles * K * N) * bytes_a, BW_GM_L1)
+    fixp = transfer_cycles(M * N * bytes_a, BW_L0C_GM)
+    mte2_aiv = transfer_cycles(M * N * bytes_t, BW_GM_UB)
+    mte3 = transfer_cycles(M * N * bytes_t, BW_UB_GM)
+    return max(mte2_aic, fixp, mte2_aiv, mte3)
 
 
 def predict_serial(cube_stage, vec_stage):

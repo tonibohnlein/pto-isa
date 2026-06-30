@@ -58,20 +58,28 @@ The model charges `latency = fill + max(cube_stage, vec_stage, ddr_lat)` for eve
 | an implicit **serial fallback = `cube+vec`** | **under-estimates the true serial** | serial `t/srl` 1.00→1.34 — real serialization also costs the intra-unit pipeline |
 | a **`fill`** term | **needed; = one cube tile** | fill = AIV `active_start` = 2426 cy (bm128), 58% of the wall at NT=1, 18% at NT=8 |
 | the **1:2 mix-cluster** (`cores_used=3·eff_units`) | **consistent** | `VEC_CORES_PER_AIC=2`; per-core AIV wall = half the vector work |
-| the **`ddr_lat`** term | **not yet grounded** | this study's first-cut `ddr_cycles` *sums* cube-store+vec-load+vec-store; those ride **different pipes and overlap**, so the analytic `mlsys` column over-reads at large NT (19777 vs 13439 @ NT8). Needs the `mixed_ddr_bound` experiment + a max-overlapped GM model |
+| the **`ddr_lat`** term | **grounded — subsumed, not separate** | `mixed_ddr_bound` (K 16→512) shows `total = max(cube, vec) + fill` across the *whole* compute↔GM-bound sweep, and `max(cube, vec, ddr) == max(cube, vec)`: the max GM port always sits **≤** the per-unit stage that already contains it. `ddr_cycles` is fixed to max-over-ports. So the mlsys26 `ddr_lat` is meaningful **only** as the *cross-unit shared-HBM-read* contention (fitted mode) — never a single-core term |
 
 **Net for the scheduler:** the model is right that a *skewed* mixed kernel overlaps to
 `max(cube, vec)`, but it (a) must add the one-tile `fill`, (b) must not credit the overlap when
 the loop can't be skewed (consumer-role / multi-round-trip → serial, which is *worse* than its
-`cube+vec` fallback), and (c) needs its `ddr` term grounded against the overlapped GM traffic
-rather than the summed transfers.
+`cube+vec` fallback), and (c) needs **no separate single-core `ddr` term** — the GM traffic is
+subsumed into `max(cube, vec)` (grounded by `mixed_ddr_bound`); `ddr_lat` earns its place only
+as the cross-unit shared-HBM-read contention.
 
-## Next experiments (planned, not yet built)
+## Status of the planned experiments
 
-- **mixed_balance** — sweep matmul `K` vs epilogue op-count so the `max()` bottleneck shifts
-  cube-bound → balanced → vector-bound; validate the `max()` picks the right stage.
-- **mixed_ddr_bound** — a memory-heavy config where the GM round-trip dominates; ground the
-  `ddr_lat` term (the open item above) — does the wall hit a GM roofline, and is it the
-  *overlapped* GM traffic (max over ports) not the sum?
-- **mixed_filldrain** is already covered by the NTILES sweep (the one-tile fill term); a
-  dedicated tiny-loop case can sharpen it if needed.
+- **mixed_ddr_bound** — **done**. K 16→512 grounds the `ddr` term (subsumed into the stages,
+  above). En route it also flips the bottleneck **STAGE** vec→cube at K≈128 (MAD grows with K;
+  the `C=C+C` vector stage is K-independent GM load+store) and the AIC **dominant pipe**
+  fixp(store)→mte2_aic(reload) — so the K-sweep already validates `max()` picks the right stage
+  on the cube-growing side. Honest caveat: the AIC stays GM-bound throughout because each tile
+  reloads `B[K,N]`, so reload ∝ K tracks MAD ∝ K; a true MAD-bound regime needs a B-resident
+  kernel (load B once, reuse across tiles).
+- **mixed_balance** *(optional)* — the K-sweep covers the cube-growing direction; a complementary
+  epilogue-op-count sweep would confirm the vec-growing direction. Lower priority now.
+- **fitted-mode cross-unit HBM contention** — the one remaining open item: run
+  `PTO_BW_MODE=fitted` so the shared HBM read pool (`mte2_aic` + `mte2_aiv`) caps. This is the
+  *only* place the mlsys26 `ddr_lat` term earns its keep — and where the 1:2 mix-cluster's two
+  vector cores reading HBM alongside the cube would contend.
+- **mixed_filldrain** — covered by the NTILES sweep (`fill` = one cube tile).

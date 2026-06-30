@@ -66,70 +66,102 @@ AICORE inline void MixedSerial(__gm__ half *A, __gm__ half *B, __gm__ float *H) 
     }
 }
 
-void mo_bm128_n128_k128_t1() {
+void md_n128_k16() {
     static __gm__ half  *const A  = reinterpret_cast<__gm__ half  *>(0x10000000);
     static __gm__ half  *const B  = reinterpret_cast<__gm__ half  *>(0x20000000);
     static __gm__ float *const b0 = reinterpret_cast<__gm__ float *>(0x30000000);
     static __gm__ float *const b1 = reinterpret_cast<__gm__ float *>(0x40000000);
-    MixedOverlap<0, 128, 128, 128, 1>(A, B, b0, b1);
+    MixedOverlap<0, 128, 16, 128, 8>(A, B, b0, b1);
 }
-void mo_bm128_n128_k128_t2() {
+void md_n128_k32() {
     static __gm__ half  *const A  = reinterpret_cast<__gm__ half  *>(0x10000000);
     static __gm__ half  *const B  = reinterpret_cast<__gm__ half  *>(0x20000000);
     static __gm__ float *const b0 = reinterpret_cast<__gm__ float *>(0x30000000);
     static __gm__ float *const b1 = reinterpret_cast<__gm__ float *>(0x40000000);
-    MixedOverlap<0, 128, 128, 128, 2>(A, B, b0, b1);
+    MixedOverlap<0, 128, 32, 128, 8>(A, B, b0, b1);
 }
-void mo_bm128_n128_k128_t4() {
+void md_n128_k64() {
     static __gm__ half  *const A  = reinterpret_cast<__gm__ half  *>(0x10000000);
     static __gm__ half  *const B  = reinterpret_cast<__gm__ half  *>(0x20000000);
     static __gm__ float *const b0 = reinterpret_cast<__gm__ float *>(0x30000000);
     static __gm__ float *const b1 = reinterpret_cast<__gm__ float *>(0x40000000);
-    MixedOverlap<0, 128, 128, 128, 4>(A, B, b0, b1);
+    MixedOverlap<0, 128, 64, 128, 8>(A, B, b0, b1);
 }
-void mo_bm128_n128_k128_t8() {
+void md_n128_k128() {
     static __gm__ half  *const A  = reinterpret_cast<__gm__ half  *>(0x10000000);
     static __gm__ half  *const B  = reinterpret_cast<__gm__ half  *>(0x20000000);
     static __gm__ float *const b0 = reinterpret_cast<__gm__ float *>(0x30000000);
     static __gm__ float *const b1 = reinterpret_cast<__gm__ float *>(0x40000000);
     MixedOverlap<0, 128, 128, 128, 8>(A, B, b0, b1);
 }
-void mo_bm64_n128_k128_t1() {
+void md_n128_k256() {
     static __gm__ half  *const A  = reinterpret_cast<__gm__ half  *>(0x10000000);
     static __gm__ half  *const B  = reinterpret_cast<__gm__ half  *>(0x20000000);
     static __gm__ float *const b0 = reinterpret_cast<__gm__ float *>(0x30000000);
     static __gm__ float *const b1 = reinterpret_cast<__gm__ float *>(0x40000000);
-    MixedOverlap<0, 64, 128, 128, 1>(A, B, b0, b1);
+    MixedOverlap<0, 128, 256, 128, 8>(A, B, b0, b1);
 }
-void mo_bm64_n128_k128_t2() {
+void md_n128_k512() {
     static __gm__ half  *const A  = reinterpret_cast<__gm__ half  *>(0x10000000);
     static __gm__ half  *const B  = reinterpret_cast<__gm__ half  *>(0x20000000);
     static __gm__ float *const b0 = reinterpret_cast<__gm__ float *>(0x30000000);
     static __gm__ float *const b1 = reinterpret_cast<__gm__ float *>(0x40000000);
-    MixedOverlap<0, 64, 128, 128, 2>(A, B, b0, b1);
+    MixedOverlap<0, 128, 512, 128, 8>(A, B, b0, b1);
 }
-void mo_bm64_n128_k128_t4() {
+void md_n256_k16() {
     static __gm__ half  *const A  = reinterpret_cast<__gm__ half  *>(0x10000000);
     static __gm__ half  *const B  = reinterpret_cast<__gm__ half  *>(0x20000000);
     static __gm__ float *const b0 = reinterpret_cast<__gm__ float *>(0x30000000);
     static __gm__ float *const b1 = reinterpret_cast<__gm__ float *>(0x40000000);
-    MixedOverlap<0, 64, 128, 128, 4>(A, B, b0, b1);
+    MixedOverlap<0, 128, 16, 256, 8>(A, B, b0, b1);
 }
-void mo_bm64_n128_k128_t8() {
+void md_n256_k32() {
     static __gm__ half  *const A  = reinterpret_cast<__gm__ half  *>(0x10000000);
     static __gm__ half  *const B  = reinterpret_cast<__gm__ half  *>(0x20000000);
     static __gm__ float *const b0 = reinterpret_cast<__gm__ float *>(0x30000000);
     static __gm__ float *const b1 = reinterpret_cast<__gm__ float *>(0x40000000);
-    MixedOverlap<0, 64, 128, 128, 8>(A, B, b0, b1);
+    MixedOverlap<0, 128, 32, 256, 8>(A, B, b0, b1);
+}
+void md_n256_k64() {
+    static __gm__ half  *const A  = reinterpret_cast<__gm__ half  *>(0x10000000);
+    static __gm__ half  *const B  = reinterpret_cast<__gm__ half  *>(0x20000000);
+    static __gm__ float *const b0 = reinterpret_cast<__gm__ float *>(0x30000000);
+    static __gm__ float *const b1 = reinterpret_cast<__gm__ float *>(0x40000000);
+    MixedOverlap<0, 128, 64, 256, 8>(A, B, b0, b1);
+}
+void md_n256_k128() {
+    static __gm__ half  *const A  = reinterpret_cast<__gm__ half  *>(0x10000000);
+    static __gm__ half  *const B  = reinterpret_cast<__gm__ half  *>(0x20000000);
+    static __gm__ float *const b0 = reinterpret_cast<__gm__ float *>(0x30000000);
+    static __gm__ float *const b1 = reinterpret_cast<__gm__ float *>(0x40000000);
+    MixedOverlap<0, 128, 128, 256, 8>(A, B, b0, b1);
+}
+void md_n256_k256() {
+    static __gm__ half  *const A  = reinterpret_cast<__gm__ half  *>(0x10000000);
+    static __gm__ half  *const B  = reinterpret_cast<__gm__ half  *>(0x20000000);
+    static __gm__ float *const b0 = reinterpret_cast<__gm__ float *>(0x30000000);
+    static __gm__ float *const b1 = reinterpret_cast<__gm__ float *>(0x40000000);
+    MixedOverlap<0, 128, 256, 256, 8>(A, B, b0, b1);
+}
+void md_n256_k512() {
+    static __gm__ half  *const A  = reinterpret_cast<__gm__ half  *>(0x10000000);
+    static __gm__ half  *const B  = reinterpret_cast<__gm__ half  *>(0x20000000);
+    static __gm__ float *const b0 = reinterpret_cast<__gm__ float *>(0x30000000);
+    static __gm__ float *const b1 = reinterpret_cast<__gm__ float *>(0x40000000);
+    MixedOverlap<0, 128, 512, 256, 8>(A, B, b0, b1);
 }
 
-TEST(MixedOverlap, All) {
-    LAUNCH_KERNEL(mo_bm128_n128_k128_t1, , (1, nullptr, nullptr));
-    LAUNCH_KERNEL(mo_bm128_n128_k128_t2, , (1, nullptr, nullptr));
-    LAUNCH_KERNEL(mo_bm128_n128_k128_t4, , (1, nullptr, nullptr));
-    LAUNCH_KERNEL(mo_bm128_n128_k128_t8, , (1, nullptr, nullptr));
-    LAUNCH_KERNEL(mo_bm64_n128_k128_t1, , (1, nullptr, nullptr));
-    LAUNCH_KERNEL(mo_bm64_n128_k128_t2, , (1, nullptr, nullptr));
-    LAUNCH_KERNEL(mo_bm64_n128_k128_t4, , (1, nullptr, nullptr));
-    LAUNCH_KERNEL(mo_bm64_n128_k128_t8, , (1, nullptr, nullptr));
+TEST(MixedDdrBound, All) {
+    LAUNCH_KERNEL(md_n128_k16, , (1, nullptr, nullptr));
+    LAUNCH_KERNEL(md_n128_k32, , (1, nullptr, nullptr));
+    LAUNCH_KERNEL(md_n128_k64, , (1, nullptr, nullptr));
+    LAUNCH_KERNEL(md_n128_k128, , (1, nullptr, nullptr));
+    LAUNCH_KERNEL(md_n128_k256, , (1, nullptr, nullptr));
+    LAUNCH_KERNEL(md_n128_k512, , (1, nullptr, nullptr));
+    LAUNCH_KERNEL(md_n256_k16, , (1, nullptr, nullptr));
+    LAUNCH_KERNEL(md_n256_k32, , (1, nullptr, nullptr));
+    LAUNCH_KERNEL(md_n256_k64, , (1, nullptr, nullptr));
+    LAUNCH_KERNEL(md_n256_k128, , (1, nullptr, nullptr));
+    LAUNCH_KERNEL(md_n256_k256, , (1, nullptr, nullptr));
+    LAUNCH_KERNEL(md_n256_k512, , (1, nullptr, nullptr));
 }
