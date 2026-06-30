@@ -166,10 +166,51 @@ def analyze_ddr_bound():
         print("     (reload ~ K tracks MAD ~ K). A B-resident kernel would push it to aic=cube at large K.")
 
 
+def analyze_contention():
+    print("\n########## mixed_contention: do cube (GM->L1) + vector (GM->UB) reads share ONE HBM pool? ##########")
+    meta = _index("mixed_contention")
+    hbm, bm, K, N, nt = meta["hbm"], meta["bm"], meta["K"], meta["N"], meta["nt"]
+    pk_c, pk_v = C.BW_GM_L1, C.BW_GM_UB         # cube reload peak 135, vector load peak 100.9
+    knee_c, knee_v = hbm / pk_c, hbm / pk_v
+    print(f"  skewed mixed kernel [bm={bm}, N={N}, K={K}, NT={nt}], multi-core, read pool={hbm:.0f} GiB/s")
+    print(f"  cube GM->L1 peak={pk_c:.0f} (knee {knee_c:.1f} cores); vector GM->UB peak={pk_v:.1f} (knee {knee_v:.1f})")
+    print(f"  {'B':>3} | {'cube mte2 un->cap':>17} {'bw_c':>6} {'pred':>5} | {'vec mte2 un->cap':>16} {'bw_v':>6} {'pred':>5}"
+          f" | {'900/B':>6} | {'wall_un':>7} {'wall_cap':>8} {'delta':>6} {'pool':>5}")
+    errs, bind_c, bind_v = [], None, None
+    for x in sorted(meta["sweep"], key=lambda r: r["B"]):
+        B = x["B"]
+        un, cap = C.read_mixed(x["un"]), C.read_mixed(x["cap"])
+        cu, cc = un["aic"]["mte2"], cap["aic"]["mte2"]    # cube reload mte2_aic (un, cap)
+        vu, vc = un["aiv"]["mte2"], cap["aiv"]["mte2"]    # vector load mte2_aiv (un, cap)
+        bw_c = pk_c * cu / cc if cc else float("nan")     # back out effective BW (pure ratio)
+        bw_v = pk_v * vu / vc if vc else float("nan")
+        prd_c, prd_v = min(pk_c, hbm / B), min(pk_v, hbm / B)
+        errs += [abs(bw_c - prd_c) / prd_c * 100, abs(bw_v - prd_v) / prd_v * 100]
+        if bind_c is None and cc > cu * 1.02:
+            bind_c = B
+        if bind_v is None and vc > vu * 1.02:
+            bind_v = B
+        # "pool" = both read pipes throttled to the SAME 900/B (one shared pool) once past both knees
+        pool = "yes" if (B > knee_v and abs(bw_c - bw_v) / bw_v < 0.05) else ("cube" if B > knee_c else "-")
+        delta = cap["total"] - un["total"]
+        print(f"  {B:>3} | {str(cu) + '->' + str(cc):>17} {bw_c:>6.1f} {prd_c:>5.0f} | "
+              f"{str(vu) + '->' + str(vc):>16} {bw_v:>6.1f} {prd_v:>5.0f} | {hbm / B:>6.1f} | "
+              f"{un['total']:>7} {cap['total']:>8} {delta:>6} {pool:>5}")
+    print(f"  -> (Q1) FLAT/uncapped: per-core mte2 (cube {C.read_mixed(meta['sweep'][0]['un'])['aic']['mte2']}, "
+          f"vector {C.read_mixed(meta['sweep'][0]['un'])['aiv']['mte2']}) is CONSTANT in B, wall_un flat -- no shared cap.")
+    print(f"     (Q2) CAPPED: cube read BW drops to 900/B from B={bind_c} (knee {knee_c:.1f}), vector from "
+          f"B={bind_v} (knee {knee_v:.1f}); back-out matches min(peak,900/B) to {max(errs):.0f}% max, wall grows.")
+    print(f"     (Q3) CROSS-UNIT: ONE total_read_gibs knob (GroupTotal pools GM_TO_L1 + GM_TO_UB) throttles")
+    print(f"     BOTH the cube AND vector reads of the SAME mixed kernel -- past the knees both collapse to")
+    print(f"     900/B (pool=yes). The single shared read pool the mlsys26 ddr_lat/par() term must model;")
+    print(f"     it is applied per-pipe-per-core as min(peak, 900/B), not as a summed-volume budget.")
+
+
 ALL = {
     "mixed_overlap": analyze_overlap,
     "mixed_serial": analyze_serial,
     "mixed_ddr_bound": analyze_ddr_bound,
+    "mixed_contention": analyze_contention,
 }
 
 

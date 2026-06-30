@@ -185,8 +185,61 @@ def gen_ddr_bound():
     return _save_index("mixed_ddr_bound", dict(sweep=idx))
 
 
+# ── mixed_contention: cross-unit shared-HBM-read contention (the mlsys26 par()/ddr_lat term) ──
+# The perf-sim pools the cube read (GM_TO_L1 / mte2_aic) AND the vector read (GM_TO_UB / mte2_aiv)
+# onto ONE `total_read_gibs` knob (arch_config.hpp HillBandwidthModel::GroupTotal returns the same
+# value for both GM read pipes). BwEff caps EACH read pipe at min(peak, total_read/ncores), with
+# ncores = block_dim (SetActiveCoreCount in LAUNCH_KERNEL). So as block_dim grows past a pipe's knee
+# (900/peak), that pipe's BW drops to 900/B and its mte2 cycles inflate ~B. We run the SKEWED mixed
+# kernel multi-core, uncapped (total_read=0, the flat no-contention baseline) vs capped (900), and
+# read mte2_aic + mte2_aiv to confirm BOTH throttle to the same 900/B from the one shared pool.
+#
+# The cap is set IN-KERNEL (MakeFlatHillModel keeps flat peaks 135/100.9 + adds the read cap). Note
+# PTO_BW_MODE=fitted leaves total_read at 0 (no cap) AND would be overridden by this in-kernel set,
+# so the contention is grounded here in the default (flat) binary, not via the env. Config: small K
+# (cheap MAD) keeps the kernel GM-read-bound so the shared read pool is the binding resource.
+_CT_BM, _CT_K, _CT_N, _CT_NT = 128, 32, 128, 4
+_CT_BS = [1, 2, 4, 8, 16, 24]
+
+
+def _contention_fid(fid, cap, bm, k, n, nt):
+    return (
+        f"void {fid}() {{\n"
+        f"    auto _m = pto::mocker::evaluator::MakeFlatHillModel();\n"
+        f"    _m.total_read_gibs = {cap};          // 0 => uncapped (flat baseline); 900 => shared pool\n"
+        f"    pto::mocker::evaluator::SetHillBandwidthModel(_m);\n"
+        f"    static __gm__ half  *const A  = {_GM_A};\n"
+        f"    static __gm__ half  *const B  = {_GM_B};\n"
+        f"    static __gm__ float *const b0 = {_GM_C0};\n"
+        f"    static __gm__ float *const b1 = {_GM_C1};\n"
+        f"    MixedOverlap<{_OP_ADD}, {bm}, {k}, {n}, {nt}>(A, B, b0, b1);\n"
+        f"}}"
+    )
+
+
+def gen_contention():
+    """mixed_contention: multi-core skewed kernel, uncapped vs total_read=900 capped, B sweep.
+    EXPECT uncapped per-core mte2 constant in B; capped cube reads throttle at B~7 (900/135) and
+    vector reads at B~9 (900/100.9), BOTH collapsing to 900/B -> one shared cross-unit read pool.
+    """
+    hbm = C.HBM_AGGREGATE_GIBS
+    defs, fids, cfgs, sweep = [_MIXED_KERNEL], [], {}, []
+    for B in _CT_BS:
+        un, cap = f"mxc_un_{B}", f"mxc_cap_{B}"
+        defs.append(_contention_fid(un, "0.0", _CT_BM, _CT_K, _CT_N, _CT_NT))
+        defs.append(_contention_fid(cap, f"{hbm}", _CT_BM, _CT_K, _CT_N, _CT_NT))
+        fids += [un, cap]
+        cfgs[un] = f"({B}, nullptr, nullptr)"
+        cfgs[cap] = f"({B}, nullptr, nullptr)"
+        sweep.append(dict(B=B, un=un, cap=cap))
+    C.write_testcase("mixed_contention", defs, fids, "MixedContention", launch_cfgs=cfgs)
+    return _save_index("mixed_contention",
+                       dict(hbm=hbm, bm=_CT_BM, K=_CT_K, N=_CT_N, nt=_CT_NT, sweep=sweep))
+
+
 ALL = {
     "mixed_overlap": gen_overlap,
     "mixed_serial": gen_serial,
     "mixed_ddr_bound": gen_ddr_bound,
+    "mixed_contention": gen_contention,
 }

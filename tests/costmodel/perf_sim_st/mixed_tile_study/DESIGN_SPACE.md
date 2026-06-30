@@ -58,7 +58,7 @@ The model charges `latency = fill + max(cube_stage, vec_stage, ddr_lat)` for eve
 | an implicit **serial fallback = `cube+vec`** | **under-estimates the true serial** | serial `t/srl` 1.00→1.34 — real serialization also costs the intra-unit pipeline |
 | a **`fill`** term | **needed; = one cube tile** | fill = AIV `active_start` = 2426 cy (bm128), 58% of the wall at NT=1, 18% at NT=8 |
 | the **1:2 mix-cluster** (`cores_used=3·eff_units`) | **consistent** | `VEC_CORES_PER_AIC=2`; per-core AIV wall = half the vector work |
-| the **`ddr_lat`** term | **grounded — subsumed, not separate** | `mixed_ddr_bound` (K 16→512) shows `total = max(cube, vec) + fill` across the *whole* compute↔GM-bound sweep, and `max(cube, vec, ddr) == max(cube, vec)`: the max GM port always sits **≤** the per-unit stage that already contains it. `ddr_cycles` is fixed to max-over-ports. So the mlsys26 `ddr_lat` is meaningful **only** as the *cross-unit shared-HBM-read* contention (fitted mode) — never a single-core term |
+| the **`ddr_lat`** term | **grounded — single-core subsumed; cross-unit pool is the real term** | `mixed_ddr_bound` (K 16→512): the single-core GM is **subsumed** into the stages (`max(cube,vec,ddr) == max(cube,vec)`; the max GM port ≤ its stage; `ddr_cycles` fixed to max-over-ports). `mixed_contention` (multi-core): the cube (`GM_TO_L1`) + vector (`GM_TO_UB`) reads share **one** 900 GiB/s pool — past the knee both collapse to `900/B`, matching `par(active, peak)=min(peak, 900/B)` to **0%**. So `ddr_lat` is the *cross-unit shared-HBM* term and **only** that — a single-core ddr term double-counts |
 
 **Net for the scheduler:** the model is right that a *skewed* mixed kernel overlaps to
 `max(cube, vec)`, but it (a) must add the one-tile `fill`, (b) must not credit the overlap when
@@ -78,8 +78,13 @@ as the cross-unit shared-HBM-read contention.
   kernel (load B once, reuse across tiles).
 - **mixed_balance** *(optional)* — the K-sweep covers the cube-growing direction; a complementary
   epilogue-op-count sweep would confirm the vec-growing direction. Lower priority now.
-- **fitted-mode cross-unit HBM contention** — the one remaining open item: run
-  `PTO_BW_MODE=fitted` so the shared HBM read pool (`mte2_aic` + `mte2_aiv`) caps. This is the
-  *only* place the mlsys26 `ddr_lat` term earns its keep — and where the 1:2 mix-cluster's two
-  vector cores reading HBM alongside the cube would contend.
+- **mixed_contention** — **done**. Multi-core skewed kernel; the cube (`GM_TO_L1`) + vector
+  (`GM_TO_UB`) reads share **one** 900 GiB/s pool — past the knee both collapse to `900/B`,
+  matching `par(active, peak)=min(peak, 900/B)` to 0%. The cube read caps at B≈7 cores
+  (900/135), the vector at B≈9 (900/100.9) — different knees, *same* pool. This is the only
+  place a separate `ddr_lat` earns its keep. (Nuance: the perf-sim applies the pool as a
+  per-pipe-per-core cap `min(peak, 900/B)`, not a summed byte-volume — but the pooling is real:
+  one `total_read_gibs` knob throttles both read pipe-types. The cap is set in-kernel via
+  `SetHillBandwidthModel`, which overrides `PTO_BW_MODE=fitted`, so the default binary's
+  uncapped-vs-capped pair *is* the flat-vs-contention comparison.)
 - **mixed_filldrain** — covered by the NTILES sweep (`fill` = one cube tile).

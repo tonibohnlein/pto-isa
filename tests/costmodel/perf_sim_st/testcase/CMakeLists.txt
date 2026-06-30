@@ -60,6 +60,7 @@ set(ALL_TESTCASES
     mixed_overlap
     mixed_serial
     mixed_ddr_bound
+    mixed_contention
 )
 
 foreach(TESTCASE ${ALL_TESTCASES})

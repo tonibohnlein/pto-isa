@@ -25,6 +25,7 @@ PERF_SIM_ROOT = STUDY_DIR.parent                      # tests/costmodel/perf_sim
 TESTCASE_DIR = PERF_SIM_ROOT / "testcase"
 RESULTS_DIR = STUDY_DIR / "results"
 CSV_DIR = RESULTS_DIR / "perf_sim_output"             # where the kernels write *_pipeline_summary.csv
+CSV_DIR_FITTED = RESULTS_DIR / "fitted" / "perf_sim_output"  # PTO_BW_MODE=fitted run (run.py --fitted)
 # The cube half reuses the proven RunGemmE2E kernel; testcases include its dir (see write_testcase).
 GEMM_KERNEL_INCLUDE = "${PROJECT_SOURCE_DIR}/../../../kernels/manual/a2a3/gemm_performance"
 
