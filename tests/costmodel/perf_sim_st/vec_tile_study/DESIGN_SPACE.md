@@ -122,6 +122,31 @@ reduction cost that's already up to 19× off. Fix the reduction cost first, then
 `32×256`, `64×128` — the reduce takes a faster `vcgadd` `TryOptimizeFP32Reduce` path, ~2.5×
 cheaper than the generic tree; `vec_splitS` avoids those shapes so the per-core trend is clean.)
 
+## The vector cost model — grounded fixes for mlsys26
+
+All four experiments point one way: **the mlsys26 vector model is systematically
+pessimistic** — it overcharges every mechanism (1.2× → 19×), so softmax / layernorm /
+attention vector stages look far more expensive than the perf-sim says, distorting fusion
+decisions. The grounded fixes (in `3rdparty/mlsys26/src/core/ascend910b_cost.cpp`,
+constants perf-sim-grounded + device-eval-pending):
+
+| # | finding | fix | status |
+| - | --- | --- | --- |
+| **1** | reduction `repeat=ROWS·COLS` overcounts up to **19×** | cost a reduction by its **reduced-axis tree** (`VecOpCompute`): reduce-W `45·(K-1)+51` (ROWS-independent), reduce-H `16·(H-1)+30·log₂H` | **done** — shared by the vector-only + mixed paths |
+| **2** | UB-overflow `×(#reductions+1)` overcounts **3–4×** | **online** model: wide body ×1, IO read once, only a thin `O(nchunks·#red)` per-chunk surcharge | **done** — the stale `STREAM >4×` test updated to the grounded `~linear` scaling |
+| **3** | per-op startup overcounts fused chains **1.2–2.7×** | charge `head+tail` **once per back-to-back stream** (reductions/matmuls break it), not per op | **done** — `pw_stream_start` tracked across the op chain in both paths |
+| **4** | split-S `compS` divides the broken reduction cost | follows from Fix 1 (`eval_reduce_S` now divides the corrected cost) | **done** via Fix 1 |
+
+Net: vector stages get **cheaper and correctly-shaped**. The reductions (Fix 1) flip tall
+row-reduces from spuriously compute-bound to DDR-bound; streamed softmax (Fix 2) no longer
+carries a phantom 3× recompute. `vec_tile_study` is the regression oracle — every formula
+matches the perf-sim to 0.0% today, so re-run it after any coefficient change.
+
+**Device-eval caveat (applies to all):** the perf-sim is the measured ground truth here,
+but its count-mode flat-per-pass (Fix 1) and online-streaming (Fix 2) are themselves coarse
+vs real HW — the constants (`45/51/16/30`, the streaming surcharge) are pending the device
+evaluation, same as the cube-side HBM-900.
+
 ## Next experiments
 
 - **`vec_dma`** — GM↔UB I/O: the DMA-shape penalty (sub-burst width) + the double-buffer
