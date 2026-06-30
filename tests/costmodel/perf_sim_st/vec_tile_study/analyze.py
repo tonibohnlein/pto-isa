@@ -125,8 +125,29 @@ def analyze_stream():
     print("     ~1, surcharge = per-chunk re-paid startup + O(NCHUNKS) thin correction, not x3.")
 
 
+def analyze_splitS():
+    print("\n=== splitS: per-core reduce ~ Wc=W/S (parallelizes); [H,1] partial store = const floor ===")
+    idx = _index("splitS")
+    H, W = idx["H"], idx["W"]
+    print(f"  sink reduce [{H},W={W}] split S ways: per core reduces [H, Wc=W/S] + stores [H,1] partial")
+    print(f"  {'S':>2} {'Wc':>5} | {'vec(reduce)':>11} {'pred':>6} {'e%':>5} | {'mte3(store)':>11} | {'merge=S*store':>13}")
+    for x in sorted(idx["sweep"], key=lambda r: r["S"]):
+        d = C.read_aiv(x["fid"])
+        pred = C.perfsim_trowsum_cycles(x["wc"])
+        err = (d["vec"] - pred) / pred * 100 if pred else float("nan")
+        print(f"  {x['S']:>2} {x['wc']:>5} | {d['vec']:>11} {pred:>6.0f} {err:>+4.1f}% | "
+              f"{d['mte3']:>11} | {x['S'] * d['mte3']:>13}")
+    print("  -> per-core reduce drops ~Wc (the split parallelizes the reduction across S cores,")
+    print("     matching perfsim_trowsum to 0.0%); the [H,1] partial store is a CONSTANT per-core")
+    print("     floor. The cross-core merge is S atomic-add partials = S*store, growing with S. So")
+    print("     split-S trades per-core compute (~1/S) for merge (~S) -- the eval_reduce_S tradeoff.")
+    print("     (Per-core reduce is ROWS-independent, so mlsys26's compS inherits the vec_reduce")
+    print("     cost error -- the split decision is built on the wrong reduction cost.)")
+
+
 ALL = {
     "vec_pointwise": analyze_pointwise,
     "vec_reduce": analyze_reduce,
     "vec_stream": analyze_stream,
+    "vec_splitS": analyze_splitS,
 }

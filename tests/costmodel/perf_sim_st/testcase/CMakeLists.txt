@@ -50,6 +50,7 @@ set(ALL_TESTCASES
     vec_pointwise
     vec_reduce
     vec_stream
+    vec_splitS
     conv2d_perf_sim
     topk_perf_sim
     fa_perf_sim

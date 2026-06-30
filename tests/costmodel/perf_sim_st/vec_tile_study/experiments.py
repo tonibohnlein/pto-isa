@@ -201,8 +201,57 @@ def gen_stream():
     return _save_index("stream", dict(rows=ROWS, cols=COLS, sweep=idx))
 
 
+# Reduced-axis cross-core split (the vector analog of the cube split-K). A sink reduction
+# over [H,W] split S ways: each core reduces its band [H, Wc=W/S] -> [H,1] and writes that
+# thin partial to GM (the S partials atomic-add merge). Mirroring gml1_splitk, we measure the
+# PER-CORE subproblem on one core: vec (the reduce) should drop ~Wc, and mte3 (the [H,1]
+# partial store) is a constant floor -- the merge cost is then S * that thin store.
+_VEC_SPLITS_KERNEL = r"""
+template <typename T, int H, int WC>
+AICORE inline void SplitReduce(__gm__ T *out) {
+    using ShapeDyn  = pto::Shape<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
+    using StrideDyn = pto::Stride<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
+    using Global    = pto::GlobalTensor<T, ShapeDyn, StrideDyn, pto::Layout::ND>;
+    using VT = pto::Tile<pto::TileType::Vec, T, H, WC, pto::BLayout::RowMajor, H, WC>;
+    using RT = pto::Tile<pto::TileType::Vec, T, H, 1, pto::BLayout::ColMajor, H, 1>;
+    constexpr int nb = H * WC * (int)sizeof(T);
+    VT src, tmp; RT partial;
+    TASSIGN(src, 0);
+    TASSIGN(tmp, nb);
+    TASSIGN(partial, 2 * nb);
+    TROWSUM(partial, src, tmp);                  // per-core band reduce [H,WC] -> [H,1]
+    ShapeDyn  shape(1, 1, 1, H, 1);
+    StrideDyn stride(H, H, H, 1, 1);
+    Global g(out, shape, stride);
+    TSTORE(g, partial);                          // write the thin [H,1] partial (UB->GM / mte3)
+}
+"""
+
+
+def gen_splitS():
+    """vec_splitS: the per-core subproblem of a sink-reduction split S ways (cube split-K analog).
+
+    A reduction over [H,W] split S ways: per core reduces [H, Wc=W/S] + stores the [H,1]
+    partial. vec (the reduce) drops ~Wc (parallelizes); mte3 (the partial store) is a const
+    floor; the cross-core merge is S * that thin store -- the compute(~1/S) vs merge(~S) tradeoff.
+    """
+    # W=512 (not the H*W==8192 shapes 8x1024/16x512/... that trigger the vcgadd FP32-reduce
+    # fast path) so every per-core band [8, Wc] takes the generic tree and matches the formula.
+    H, W = 8, 512
+    defs, fids, idx = [_VEC_SPLITS_KERNEL], [], []
+    for S in [1, 2, 4, 8]:
+        wc = W // S
+        fid = f"sp_s{S}"
+        defs.append(f"void {fid}() {{ SplitReduce<float, {H}, {wc}>(nullptr); }}")
+        fids.append(fid)
+        idx.append(dict(S=S, wc=wc, H=H, W=W, fid=fid))
+    C.write_testcase("vec_splitS", defs, fids, "VecSplitS")
+    return _save_index("splitS", dict(H=H, W=W, sweep=idx))
+
+
 ALL = {
     "vec_pointwise": gen_pointwise,
     "vec_reduce": gen_reduce,
     "vec_stream": gen_stream,
+    "vec_splitS": gen_splitS,
 }

@@ -58,6 +58,7 @@ Device-calibrated coefficients (`cce_costmodel_vector_compute.hpp`), as `(slope,
 | **vec_pointwise** | per-op `slope·repeat + once-per-stream (head+tail)` | every op matches the stub to **0.0%** (add 2/24, mul 2/25, div 4/30, exp 2/31); the per-op startup is paid **once per chain**, so mlsys26's per-op charge overcounts fused chains **1.2×→2.7×** (NOPS 1→16) |
 | **vec_reduce** | reductions are barrier-separated **trees**, not a single `slope·repeat` op | `TROWSUM` (reduce W) = `45·(COLS/64)+6` — **ROWS-independent**; `TCOLSUM` (reduce H) = `16(R-1)+30·log₂R` — both to **0.0%**. mlsys26's `repeat=ROWS·COLS/64` overcounts a tall-tile `TROWSUM` up to **19×** |
 | **vec_stream** | UB-overflow streaming recompute factor (`N_passes`) | online-streamed softmax wide body is **flat (≤1×)** across NCHUNKS 1→8 (`exp` runs once per element); mlsys26's `#reductions+1 = 3×` multiplier is **3–4× pessimistic** on every streamed softmax |
+| **vec_splitS** | reduced-axis cross-core split (cube split-K analog) | per-core reduce drops ∝ `Wc=W/S` (366→51, S 1→8, to **0.0%**); the `[H,1]` partial store is a **constant 3-cycle floor**; merge = `S·store` grows — the compute(~1/S)-vs-merge(~S) tradeoff (`eval_reduce_S`) |
 
 ## How mlsys26 diverges (the grounding gaps this study targets)
 

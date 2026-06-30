@@ -13,7 +13,7 @@ experiments that verify them. Sibling of `gm_l1_tile_study/DESIGN_SPACE.md`.
 | once-per-stream startup | per-op head+tail | ✗ (overcounts chains) | `vec_pointwise` [M] |
 | count-mode floor (+16) | not modeled | ✗ | `vec_reduce` [M] (reductions run in count mode) |
 | reduction cost | `head+slope_reduce·repeat+tail`, `repeat=ROWS·COLS/64` | **✗ — structurally wrong** (a tree, not one op; reduce W is ROWS-independent) | `vec_reduce` [M] |
-| reduced-axis sink split-S | the cube split-K analog, sink-only | — | _planned_ `vec_splitS` |
+| reduced-axis sink split-S | the cube split-K analog, sink-only | per-core reduce ✓; merge = S·[H,1] | `vec_splitS` [M] |
 | implicit streaming recompute | `N_passes = #reductions+1` (upper bound) | **✗ — 3–4× pessimistic** (real emit is online) | `vec_stream` [M] |
 | GM↔UB per-direction `par()` cap | `io/par(active, bw)` | read pool ✓ (`gml1_contention`) | — |
 | DMA-shape penalty (sub-burst width) | `max(1, burst/(w·dtype))` | — | _planned_ |
@@ -28,6 +28,7 @@ experiments that verify them. Sibling of `gm_l1_tile_study/DESIGN_SPACE.md`.
 | a reduction is a barrier-separated **tree**, not one op | `vec_reduce` | `TROWSUM = 45·(COLS/64)+6`, `TCOLSUM = 16(R-1)+30·log₂R`, both to **0.0%** |
 | reduce-W (`TROWSUM`) is **ROWS-independent** (count mode) | `vec_reduce` | sim flat at 96 over ROWS 8→64; mlsys26 (`repeat=ROWS·COLS/64`) overcounts up to **19×** |
 | UB-overflow streaming is **online** (~1 wide pass), not `#reductions+1` | `vec_stream` | online softmax wide body flat (≤1×) over NCHUNKS 1→8; mlsys26's `3×` is 3–4× over |
+| reduced-axis split-S: per-core reduce ∝ `Wc`, merge = `S·[H,1]` | `vec_splitS` | per-core 366→51 (S 1→8) to 0.0%; `[H,1]` store a 3-cycle floor; merge `S·store` |
 
 ## vec_pointwise — the per-op formula + chain accounting [M]
 
@@ -96,10 +97,33 @@ asks for: a per-op-liveness model — wide-body recompute factor **≈1**, plus 
 surcharge (re-paid vector startup at each barrier + `O(NCHUNKS·ROWS·1)` thin correction). The
 current model triples the cost of the large-context attention regime it most needs to get right.
 
+## vec_splitS — the reduced-axis cross-core split (cube split-K analog) [M]
+
+A sink reduction over `[H,W]` split S ways: each of S cores reduces its band `[H, Wc=W/S]`
+→ `[H,1]` and the S partials atomic-add merge. Mirroring `gml1_splitk`, we measure the
+**per-core subproblem** on one core (the perf-sim is per-core; the cross-core merge is a
+cost-model term). Per-core `vec` matches the reduction formula to 0.0% and drops with Wc;
+the `[H,1]` partial store (`mte3`) is a constant floor:
+
+| S | Wc | per-core `vec` | `[H,1]` store | merge `S·store` |
+| - | --- | --- | --- | --- |
+| 1 | 512 | 366 | 3 | 3 |
+| 4 | 128 | 96 | 3 | 12 |
+| 8 | 64 | 51 | 3 | 24 |
+
+So split-S trades **per-core compute (~1/S)** for **merge (~S thin partials)** — the
+`eval_reduce_S` tradeoff, where an optimal S balances the two and the bound flips
+compute→merge at a knee. **But** the per-core reduce inherits the `vec_reduce` finding: it's
+ROWS-independent and tracks the reduced-axis tree, whereas mlsys26's `compS` divides the
+*wrong* `total_compute` (`slope_reduce·ROWS·COLS`) — so the split decision is built on a
+reduction cost that's already up to 19× off. Fix the reduction cost first, then the split.
+
+(Caveat: at the exact shapes `H·W = 8192` with a ColMajor `[H,1]` dst — `8×1024`, `16×512`,
+`32×256`, `64×128` — the reduce takes a faster `vcgadd` `TryOptimizeFP32Reduce` path, ~2.5×
+cheaper than the generic tree; `vec_splitS` avoids those shapes so the per-core trend is clean.)
+
 ## Next experiments
 
-- **`vec_splitS`** — the sink-only reduced-axis cross-core split (the cube split-K analog):
-  S partials, the thin `[H,1]`/`[1,W]` atomic-add store folded into the roofline.
 - **`vec_dma`** — GM↔UB I/O: the DMA-shape penalty (sub-burst width) + the double-buffer
   serialization floor, on the `mte2_aiv`/`mte3` pipes.
 
