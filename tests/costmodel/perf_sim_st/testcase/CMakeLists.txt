@@ -56,6 +56,9 @@ set(ALL_TESTCASES
     conv2d_perf_sim
     topk_perf_sim
     fa_perf_sim
+    mixed_probe
+    mixed_overlap
+    mixed_serial
 )
 
 foreach(TESTCASE ${ALL_TESTCASES})

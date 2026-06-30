@@ -1,0 +1,160 @@
+# Copyright (c) 2026 Huawei Technologies Co., Ltd.
+# Experiment definitions for the MIXED cube+vector tile cost-model study. Each generator writes a
+# perf-sim testcase (testcase/<name>/{main.cpp,CMakeLists.txt}) and returns an index used by
+# analyze.py. The CUBE half reuses RunGemmE2E from gemm_performance_kernel.cpp (included by
+# common.MAIN_HEADER); the VECTOR epilogue + the two pipeline schedules are inline below.
+# NOTE: testcase names here must also be listed in testcase/CMakeLists.txt (ALL_TESTCASES).
+#
+# Two schedules over the SAME tiled matmul->pointwise work isolate the overlap question:
+#   mixed_overlap  -- SKEWED ping-pong (the SkewCrossCorePipeline producer-skew): the cube runs
+#                     one tile ahead on the OTHER of two GM buffers, so cube(k+1) overlaps
+#                     vector(k).  total ~= max(cube, vec) + one tile of fill/drain.
+#   mixed_serial   -- single handoff buffer + B-operand chaining: cube(k>=1) reads its B operand
+#                     FROM the handoff buffer the prior vector wrote, so the perf-sim's RAW edge
+#                     forces cube(k) to wait for vector(k-1).  total ~= cube + vec (the sum).
+#
+# Why the dep tricks work (see tile_dep_tracker.hpp): the perf-sim tracks ONLY read-after-write
+# cross-pipe deps (an op's INPUT vs the latest writer of that address). WAR/WAW are NOT tracked.
+# So overlap needs distinct producer/consumer buffers (ping-pong); serial needs a real RAW edge
+# from the vector's output back into the next cube's INPUT (the B-operand chain).
+
+import json
+
+import common as C
+
+
+def _save_index(name, index):
+    C.RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    (C.RESULTS_DIR / f"{name}_index.json").write_text(json.dumps(index, indent=2))
+    return index
+
+
+# ── inline mixed kernels (cube tile via RunGemmE2E + vector epilogue + the two schedules) ──
+_MIXED_KERNEL = r"""
+// One [BM,N] output tile = A_block @ B  (fp16 in, fp32 acc), via the proven single-tile gemm.
+template <int BM, int K, int N>
+AICORE inline void CubeTile(__gm__ float *out, __gm__ half *a, __gm__ half *b) {
+    RunGemmE2E<float, half, half, float, /*blockDim=*/1,
+               BM, K, N, BM, K, N, BM, K, N, BM, K, N, 1, 1, 1, 1>(out, a, b);
+}
+
+// In-place pointwise epilogue over the [BM,N] handoff tile: load GM->UB, op, store UB->GM. The
+// TLOAD reads `cbuf` -> a cross-pipe RAW edge onto the cube FIX store that produced it; the
+// TSTORE re-registers `cbuf` as freshly written (read by the next cube in the serial chain).
+template <int OP, int BM, int N>
+AICORE inline void VectorTile(__gm__ float *cbuf, std::size_t ub_off) {
+    using ShapeDyn  = pto::Shape<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
+    using StrideDyn = pto::Stride<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
+    using Global    = pto::GlobalTensor<float, ShapeDyn, StrideDyn, pto::Layout::ND>;
+    using VT        = pto::Tile<pto::TileType::Vec, float, BM, N, pto::BLayout::RowMajor, BM, N>;
+    VT v;
+    TASSIGN(v, ub_off);
+    ShapeDyn  shape(1, 1, 1, BM, N);
+    StrideDyn stride(BM * N, BM * N, BM * N, N, 1);
+    Global g(cbuf, shape, stride);
+    TLOAD(v, g);                                  // GM->UB (MTE2_AIV): waits the cube store on cbuf
+    if constexpr (OP == 0) { TADD(v, v, v); }     // VEC: C = C + C
+    else if constexpr (OP == 3) { TEXP(v, v); }   // VEC: C = exp(C)
+    TSTORE(g, v);                                 // UB->GM (MTE3): re-registers cbuf's writer
+}
+
+// SKEWED ping-pong: the cube produces tile 0 up front, then each loop step produces tile k+1 into
+// the OTHER of two GM buffers while the vector consumes tile k from THIS buffer. cube(k+1) and
+// vector(k) touch different buffers -> no dep -> the two units overlap. The per-tile RAW (vector
+// reads the cube's buffer) is hidden one tile deep. NTILES=1 degenerates to a single serial tile.
+template <int OP, int BM, int K, int N, int NTILES>
+AICORE inline void MixedOverlap(__gm__ half *A, __gm__ half *B, __gm__ float *buf0, __gm__ float *buf1) {
+    __gm__ float *buf[2] = {buf0, buf1};
+    CubeTile<BM, K, N>(buf[0], A, B);                                  // prologue: produce tile 0
+    for (int k = 0; k < NTILES; ++k) {
+        if (k + 1 < NTILES) {
+            CubeTile<BM, K, N>(buf[(k + 1) & 1], A + (k + 1) * BM * K, B);  // produce tile k+1 (other buffer)
+        }
+        VectorTile<OP, BM, N>(buf[k & 1], 0x100000);                       // consume tile k (this buffer)
+    }
+}
+
+// SERIAL: one handoff buffer H, reused every tile. cube(k>=1) takes its B operand FROM H (the
+// buffer the prior vector wrote) -> a tracked RAW edge -> cube(k) cannot start until vector(k-1)
+// finishes. vector(k) then waits cube(k) (RAW on H). The chain cube(0)->vec(0)->cube(1)->...
+// is fully serialized: total ~= NTILES*(cube + vec).
+template <int OP, int BM, int K, int N, int NTILES>
+AICORE inline void MixedSerial(__gm__ half *A, __gm__ half *B, __gm__ float *H) {
+    for (int k = 0; k < NTILES; ++k) {
+        __gm__ half *bk = (k == 0) ? B : reinterpret_cast<__gm__ half *>(H);  // chain B<-H for k>=1
+        CubeTile<BM, K, N>(H, A + k * BM * K, bk);   // k>=1: the B-load on H waits vector(k-1)
+        VectorTile<OP, BM, N>(H, 0x100000);          // reads H -> waits cube(k)
+    }
+}
+"""
+
+# Distinct, widely-spaced fake GM bases so A / B / handoff buffers never alias in the dep tracker
+# (addresses are never dereferenced -- the cost model is data-agnostic).
+_GM_A = "reinterpret_cast<__gm__ half  *>(0x10000000)"
+_GM_B = "reinterpret_cast<__gm__ half  *>(0x20000000)"
+_GM_C0 = "reinterpret_cast<__gm__ float *>(0x30000000)"
+_GM_C1 = "reinterpret_cast<__gm__ float *>(0x40000000)"
+
+# (bm, K, N) tile shapes. Small so builds/runs are fast: fp16 in, fp32 acc, single K=128 step.
+_SHAPES = [(128, 128, 128), (64, 128, 128)]
+_NTILES = [1, 2, 4, 8]
+_OP_ADD = 0  # C = C + C
+
+
+def _overlap_fid(fid, op, bm, k, n, nt):
+    return (
+        f"void {fid}() {{\n"
+        f"    static __gm__ half  *const A  = {_GM_A};\n"
+        f"    static __gm__ half  *const B  = {_GM_B};\n"
+        f"    static __gm__ float *const b0 = {_GM_C0};\n"
+        f"    static __gm__ float *const b1 = {_GM_C1};\n"
+        f"    MixedOverlap<{op}, {bm}, {k}, {n}, {nt}>(A, B, b0, b1);\n"
+        f"}}"
+    )
+
+
+def _serial_fid(fid, op, bm, k, n, nt):
+    return (
+        f"void {fid}() {{\n"
+        f"    static __gm__ half  *const A = {_GM_A};\n"
+        f"    static __gm__ half  *const B = {_GM_B};\n"
+        f"    static __gm__ float *const H = {_GM_C0};\n"
+        f"    MixedSerial<{op}, {bm}, {k}, {n}, {nt}>(A, B, H);\n"
+        f"}}"
+    )
+
+
+def gen_overlap():
+    """mixed_overlap: skewed ping-pong producer. EXPECT total ~= max(cube,vec) + one tile fill,
+    so overlap_factor -> ~1 as NTILES grows (fill amortizes) and -> 0 at NTILES=1.
+    """
+    defs, fids, idx = [_MIXED_KERNEL], [], []
+    for bm, k, n in _SHAPES:
+        for nt in _NTILES:
+            fid = f"mo_bm{bm}_n{n}_k{k}_t{nt}"
+            defs.append(_overlap_fid(fid, _OP_ADD, bm, k, n, nt))
+            fids.append(fid)
+            idx.append(dict(bm=bm, K=k, N=n, ntiles=nt, op=_OP_ADD, fid=fid))
+    C.write_testcase("mixed_overlap", defs, fids, "MixedOverlap")
+    return _save_index("mixed_overlap", dict(sweep=idx))
+
+
+def gen_serial():
+    """mixed_serial: single handoff buffer + B-operand chain. EXPECT total ~= cube + vec (sum),
+    so overlap_factor ~= 0 for every NTILES (AIV active_start ~ AIC active_end each tile).
+    """
+    defs, fids, idx = [_MIXED_KERNEL], [], []
+    for bm, k, n in _SHAPES:
+        for nt in _NTILES:
+            fid = f"ms_bm{bm}_n{n}_k{k}_t{nt}"
+            defs.append(_serial_fid(fid, _OP_ADD, bm, k, n, nt))
+            fids.append(fid)
+            idx.append(dict(bm=bm, K=k, N=n, ntiles=nt, op=_OP_ADD, fid=fid))
+    C.write_testcase("mixed_serial", defs, fids, "MixedSerial")
+    return _save_index("mixed_serial", dict(sweep=idx))
+
+
+ALL = {
+    "mixed_overlap": gen_overlap,
+    "mixed_serial": gen_serial,
+}
