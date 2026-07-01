@@ -52,13 +52,20 @@ decided **purely by the data dependencies the kernel encodes**:
 `Ascend910BMixed::compute_cost` charges, for a mixed group:
 
 ```
-latency = fill + max(cube_stage, vec_stage, ddr_lat)        # full overlap, UNCONDITIONALLY
-cores_used = 3 * eff_units                                   # the 1 cube : 2 vector mix-cluster
+2-stage: latency = max(cube_stage + one_vec_tile, vec_stage + one_cube_tile, ddr_lat)
+3-stage: latency = max(cube_stage, vec_stage, ddr_lat)      # fill absorbed
+         + rounds * kernel_fill_cost                        # per-LAUNCH fill (separate term)
+cores_used = 3 * eff_units                                  # the 1 cube : 2 vector mix-cluster
 ```
 
 This study validates two things the model assumes: **(a)** the `max(...)` overlap is real
 *only when the kernel is skewed* (else it degrades to the sum — or worse), and **(b)** the
-`fill` term on short tile loops.
+per-tile **fill** = the bottleneck unit's initial idle. The shipped model folds that fill
+**inside** the `max` as the symmetric cross-term (each stage + one tile of the OTHER unit), so
+it ADDS for a 2-stage shape and is ABSORBED for a 3-stage / DDR-bound one — *not* the older
+additive `fill + max`. `predict_pipelined = max(cube,vec) + fill` below is the additive proxy
+the sim fits in the compute-bound sweep; the cross-term is the shipped equivalent that also
+stays correct when DDR-bound.
 
 ## Experiments & findings
 
@@ -98,9 +105,11 @@ Measured (bm=128, N=128, K=128, fp16 in / fp32 acc, `C = C + C` epilogue):
    loops) produces the **serial** kernel — which the model over-credits by up to **2.26×**.
    And the model's implicit serial fallback (`cube + vec`) itself **under-estimates** the true
    serial by 1.0→1.34×, because real serialization also costs the intra-unit pipeline.
-2. **No fill/drain term in practice.** The producer-skew prologue is **exactly one cube tile**
-   — 58% of the wall at NTILES=1, still 18% at NTILES=8. Single-/few-tile mixed kernels pay
-   it in full; the model's `fill` must carry it.
+2. **The fill/drain term — now modeled (gap closed).** The producer-skew prologue is **one
+   producer tile** (a cube tile in this `c→v` sweep) — 58% of the wall at NTILES=1, still 18% at
+   NTILES=8, so single-/few-tile mixed kernels pay it in full. The shipped model now carries it
+   as the symmetric cross-term (folded inside the `max`: adds for a 2-stage shape, absorbed for
+   a 3-stage / DDR-bound one), so this gap is **closed** — see the model summary above.
 3. **The 1:2 mix-cluster holds** (`VEC_CORES_PER_AIC = 2`), but the per-core AIV wall is half
    the total vector work — the `/(2·eff_units)` division is consistent with the sim.
 

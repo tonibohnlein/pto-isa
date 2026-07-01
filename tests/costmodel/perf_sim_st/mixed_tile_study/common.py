@@ -44,9 +44,14 @@ VEC_REG_BYTES = 256          # vector register: 64 fp32 / 128 fp16 per SIMD repe
 BYTES = {"bf16": 2, "fp16": 2, "fp32": 4}
 
 # --- mlsys26 mixed model (Ascend910BMixed::compute_cost) -----------------------------
-# latency = fill + max(cube_stage, vec_stage, ddr_lat)   -- FULL cube/vector/DDR overlap,
-# UNCONDITIONALLY. This study validates (a) that the overlap is real only when the kernel is
-# skewed (else it degrades to the sum), and (b) the fill/drain term on short tile loops.
+# SHIPPED form (2-stage): latency = max(cube_stage + one_vec_tile, vec_stage + one_cube_tile, ddr)
+#              (3-stage): latency = max(cube_stage, vec_stage, ddr)          -- fill absorbed
+# The fill is folded INSIDE the max as the symmetric cross-term (each stage + one tile of the
+# OTHER unit), so it ADDS for a 2-stage shape and is ABSORBED for a 3-stage / DDR-bound one --
+# NOT the older additive `fill + max`. This study validates (a) the overlap is real only when
+# the kernel is skewed (else it degrades to the sum), and (b) the fill rule; predict_pipelined
+# (max + fill) below is the additive proxy the sim fits in the compute-bound sweep, equivalent
+# to the cross-term there.
 MLSYS_SLOPE_PW = 2.0
 MLSYS_SLOPE_REDUCE = 14.0
 MLSYS_HEAD = 14.0

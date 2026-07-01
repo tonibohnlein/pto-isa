@@ -50,7 +50,11 @@ the table.
 
 ## mlsys26 cross-check (`Ascend910BMixed::compute_cost`)
 
-The model charges `latency = fill + max(cube_stage, vec_stage, ddr_lat)` for every mixed group.
+The model charges, per mixed group, the **symmetric cross-term** (fill folded inside the `max`):
+`max(cube_stage + one_vec_tile, vec_stage + one_cube_tile, ddr_lat)` for a 2-stage shape,
+`max(cube_stage, vec_stage, ddr_lat)` for a 3-stage one (fill absorbed), plus a per-launch
+`rounds * kernel_fill_cost`. (The earlier additive `fill + max` is superseded; the measurements
+below fit the cross-term — see README's model summary.)
 
 | model assumption | verdict | evidence |
 | --- | --- | --- |
@@ -61,13 +65,14 @@ The model charges `latency = fill + max(cube_stage, vec_stage, ddr_lat)` for eve
 | the **`ddr_lat`** term | **grounded — single-core subsumed; cross-unit pool is the real term** | `mixed_ddr_bound` (K 16→512): the single-core GM is **subsumed** into the stages (`max(cube,vec,ddr) == max(cube,vec)`; the max GM port ≤ its stage; `ddr_cycles` fixed to max-over-ports). `mixed_contention` (multi-core): the cube (`GM_TO_L1`) + vector (`GM_TO_UB`) reads share **one** 900 GiB/s pool — past the knee both collapse to `900/B`, matching `par(active, peak)=min(peak, 900/B)` to **0%**. So `ddr_lat` is the *cross-unit shared-HBM* term and **only** that — a single-core ddr term double-counts |
 
 **Net for the scheduler:** the model is right that a *skewed* mixed kernel overlaps to
-`max(cube, vec)`, but it (a) must add `fill` = the **bottleneck unit's initial idle** (one
-producer-tile for a 2-stage kernel; ~0 for a 3-stage kernel where the output unit does
-double-duty), (b) must not credit the overlap only for a **genuine cross-tile carry / multi
-round-trip** (single round-trip — `c→v`, `v→c`, `v→c→v`, `c→v→c` — all overlap; the serial
-fallback `cube+vec` even *under*-estimates the true serial by 1.0→1.34×), and (c) needs **no
-separate single-core `ddr` term** — subsumed into `max(cube, vec)` (`mixed_ddr_bound`); `ddr_lat`
-earns its place only as the cross-unit shared-HBM-read contention.
+`max(cube, vec)`, and (a) it folds the **fill** inside that `max` as the cross-term (one
+non-bottleneck tile onto each stage) = the **bottleneck unit's initial idle**: adds for a
+2-stage kernel, ~0 for a 3-stage kernel where the output unit does double-duty — the shipped
+form, superseding the additive `fill + max`; (b) it must not credit the overlap for a **genuine
+cross-tile carry / multi round-trip** (single round-trip — `c→v`, `v→c`, `v→c→v`, `c→v→c` — all
+overlap; the serial fallback `cube+vec` even *under*-estimates the true serial by 1.0→1.34×);
+and (c) it needs **no separate single-core `ddr` term** — subsumed into `max(cube, vec)`
+(`mixed_ddr_bound`); `ddr_lat` earns its place only as the cross-unit shared-HBM-read contention.
 
 ## Status of the planned experiments
 
