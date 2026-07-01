@@ -71,6 +71,7 @@ sweeping `NTILES ∈ {1,2,4,8}`:
 | **mixed_serial** | per-tile RAW chain: cube(k) takes its B-operand from the handoff buffer the prior vector wrote, so it waits vector(k−1) | `total = the sum, and EXCEEDS it` (1.0→1.34×) — isolating each tile also kills intra-AIC cross-tile pipelining |
 | **mixed_ddr_bound** | the skewed kernel, sweeping K 16→512 (cube MAD grows; the `C=C+C` GM stages don't) | `total = max(cube, vec) + fill` holds across the *whole* compute↔GM-bound sweep; the **`ddr` is subsumed** into the stages (`max(cube,vec,ddr) == max(cube,vec)`), never a separate term. Bottleneck stage flips vec→cube at K≈128 |
 | **mixed_contention** | the skewed kernel multi-core (B 1→24) with the HBM read pool capped at 900 GiB/s | the cube (`GM_TO_L1`) + vector (`GM_TO_UB`) reads share **one** pool — past the knee both collapse to `900/B`, matching `par(active,peak)=min(peak,900/B)` to **0%**. Cube caps at B≈7, vector at B≈9. The one place a separate cross-unit `ddr_lat` is real |
+| **mixed_vcv / vc / cvc** (shape sweep) | the 4 canonical single-round-trip shapes: `c→v`, `v→c`, `v→c→v`, `c→v→c` (flash-decode) | **`fill` = the bottleneck unit's initial idle** — adds one producer-tile for the 2-stage shapes (`c→v`, `v→c`), **absorbed** for the 3-stage shapes (`v→c→v`, `c→v→c`; `t/(max+fill)=1.00`). All single round-trip → all **overlap**. `c→v→c`'s two cubes overlap (~2× vs serial), validating upstream #1900's per-stage buffers |
 
 Measured (bm=128, N=128, K=128, fp16 in / fp32 acc, `C = C + C` epilogue):
 

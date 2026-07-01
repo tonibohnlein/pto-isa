@@ -206,11 +206,125 @@ def analyze_contention():
     print(f"     it is applied per-pipe-per-core as min(peak, 900/B), not as a summed-volume budget.")
 
 
+def _aic_pipe_first(fid, pipe, csv_dir=None):
+    """(start, end) of the FIRST pure-AIC (cube) event on `pipe` from the swimlane JSON.
+    AIC-only threads are tid '[AIC-0] <PIPE>'; the shared '[AIC-0/AIV-0] ...' vector threads are
+    excluded. Used to time cube(0): its first MTE2 (load) start = the wait for vec1(0); its first
+    FIXP end = C-buffer first write = when vec2(0) can start (the pipeline fill)."""
+    p = (csv_dir or C.CSV_DIR) / f"{fid}.json"
+    best = None
+    for e in json.loads(p.read_text()):
+        if e.get("ph") == "X" and "ts" in e:
+            tid = str(e["tid"])
+            if tid.startswith("[AIC-0]") and pipe in tid:
+                s, en = e["ts"], e["ts"] + e.get("dur", 0)
+                if best is None or s < best[0]:
+                    best = (s, en)
+    return best
+
+
+def analyze_vcv():
+    print("\n########## mixed_vcv: 3-stage vec1->cube->vec2 -- how deep does the pipeline FILL get? ##########")
+    idx = _index("mixed_vcv")["sweep"]
+    bm, K, N = idx[0]["bm"], idx[0]["K"], idx[0]["N"]
+    # 2-stage reference fill (cube_tile) from mixed_overlap at the same shape, if its JSON is present
+    ref = {}
+    try:
+        for r in _index("mixed_overlap")["sweep"]:
+            if (r["bm"], r["K"], r["N"]) == (bm, K, N):
+                f = _aic_pipe_first(r["fid"], "FIXP")
+                if f:
+                    ref[r["ntiles"]] = f[1]   # 2-stage fill = cube(0) C-store end = cube_tile
+    except (FileNotFoundError, KeyError):
+        pass
+    print(f"  3-stage skewed vec1(A'=A+A) -> cube(C=A'@B) -> vec2(C=C+C), tile [bm={bm}, N={N}, K={K}]")
+    print(f"  vec1 & vec2 BOTH pool on the AIV; cube on the AIC. Fill = when vec2(0) can first start.")
+    print(f"  {'NT':>3} | {'cubeStage':>9} {'vecStage':>8} {'total':>6} {'t/vec':>5} | "
+          f"{'vec1_t':>6} {'cube_t':>6} {'fill_vcv':>8} {'fill_2st':>8} {'deepen':>6} | {'max+fill':>8} {'t/(m+f)':>7}")
+    for r in sorted(idx, key=lambda r: r["ntiles"]):
+        nt = r["ntiles"]
+        m = C.read_mixed(r["fid"])
+        cube_stage, vec_stage, total = m["aic"]["active"], m["aiv"]["active"], m["total"]
+        load0 = _aic_pipe_first(r["fid"], "MTE2")   # cube(0) first load start = wait for vec1(0)
+        fixp0 = _aic_pipe_first(r["fid"], "FIXP")   # cube(0) C-store end = vec2(0) can start = fill
+        fill_vcv = fixp0[1]
+        vec1_t = load0[0]                            # cube start delay ~ vec1_tile
+        cube_t = fill_vcv - vec1_t                   # cube(0) span = cube_tile
+        fill_2st = ref.get(nt, cube_t)               # 2-stage fill = cube_tile (measured or derived)
+        deepen = fill_vcv - fill_2st                 # extra prologue depth from the vec1 stage
+        mf = max(cube_stage, vec_stage) + fill_vcv
+        print(f"  {nt:>3} | {cube_stage:>9} {vec_stage:>8} {total:>6} {total / vec_stage:>5.2f} | "
+              f"{vec1_t:>6} {cube_t:>6} {fill_vcv:>8} {fill_2st:>8} {deepen:>+6} | {mf:>8} {total / mf:>7.2f}")
+    print("  -> (Q1) total tracks the AIV bottleneck: vecStage = AIV active span carries BOTH vector")
+    print("     phases (mte2_aiv+vec+mte3 cover vec1 A-load/A'-store AND vec2 C-load/out-store), and")
+    print("     total == vecStage to ~1 cycle (t/vec ~ 1.00). Pooling 2 vector phases on the AIV makes")
+    print("     it the bottleneck (vec1+vec2 > 1 cube), so total ~ max(cube,vec) = vecStage.")
+    print("     (Q2) the FILL deepens to a 2-stage prologue: fill_vcv = vec1_tile + cube_tile (measured")
+    print("     as cube(0)'s C-store completion = when vec2 can first start), DEEPER than the 2-stage's")
+    print("     fill = cube_tile by exactly one vec1 tile (deepen col), constant in NT. NOTE the deeper")
+    print("     fill is ABSORBED into the AIV's vec1 prologue (vec1 has no upstream dep, starts at t=0),")
+    print("     so total tracks vecStage, NOT max+fill (t/(m+f) < 1) -- the naive max+fill over-counts.")
+
+
+def analyze_vc():
+    print("\n########## mixed_vc: 2-stage vec1->cube (CUBE output) -- fill on the OTHER unit ##########")
+    idx = _index("mixed_vc")["sweep"]
+    bm, K, N = idx[0]["bm"], idx[0]["K"], idx[0]["N"]
+    print(f"  vec1(A'=A+A) -> cube(C=A'@B, stores C), tile [bm={bm}, N={N}, K={K}]. The CUBE is the")
+    print(f"  output stage; it IDLES during vec1(0), so the fill = vec1_tile ADDS (mirror of mixed_overlap).")
+    print(f"  {'NT':>3} | {'cubeStage':>9} {'vec1Stage':>9} {'fill':>5} | {'total':>6} {'max+fill':>8} "
+          f"{'t/(m+f)':>7} | {'bott':>5}")
+    for r in sorted(idx, key=lambda r: r["ntiles"]):
+        m = C.read_mixed(r["fid"])
+        total, vec1_stage = m["total"], m["aiv"]["active"]
+        fill = _aic_pipe_first(r["fid"], "MTE2")[0]   # cube's first-load start = idle for vec1(0) = vec1_tile
+        cube_stage = total - fill                      # the cube's continuous run (bottleneck)
+        mf = max(cube_stage, vec1_stage) + fill
+        bott = "cube" if cube_stage >= vec1_stage else "vec1"
+        print(f"  {r['ntiles']:>3} | {cube_stage:>9} {vec1_stage:>9} {fill:>5} | {total:>6} {mf:>8} "
+              f"{total / mf:>7.2f} | {bott:>5}")
+    print("  -> the CUBE (output stage) is the bottleneck (cubeStage > vec1Stage) AND the consumer, so")
+    print("     it idles vec1_tile before cube(0) can start -> fill = vec1_tile ADDS: total = cubeStage +")
+    print("     fill = max(cube,vec1) + vec1_tile (t/(m+f) ~ 1.00). The exact MIRROR of mixed_overlap")
+    print("     (fill = the OTHER unit's first tile), and the opposite of mixed_vcv where the prologue sat")
+    print("     on the bottleneck AIV and was absorbed.")
+
+
+def analyze_cvc():
+    print("\n########## mixed_cvc: 3-stage cube1->vec->cube2 (CUBE output) -- do the two cubes overlap? ##########")
+    idx = _index("mixed_cvc")["sweep"]
+    bm, K, N = idx[0]["bm"], idx[0]["K"], idx[0]["N"]
+    t1 = C.read_mixed(next(r["fid"] for r in idx if r["ntiles"] == 1))["total"]  # 1-tile fully-serial ref
+    print(f"  cube1(A@B) -> vec(C1+C1) -> cube2(C1'@D, stores C2), tile [bm={bm}, N={N}, K={K}]. The AIC")
+    print(f"  runs BOTH cubes (cube_stage = cube1+cube2); separate ping-pong pairs so the cubes pipeline.")
+    print(f"  serial-per-tile (NT=1, no overlap possible) = {t1}.")
+    print(f"  {'NT':>3} | {'cubeStage':>9} {'vecStage':>8} {'fill':>5} | {'total':>6} {'max+fill':>8} {'t/(m+f)':>7}"
+          f" | {'serial':>6} {'t/srl':>5} {'2cube/NT':>8}")
+    for r in sorted(idx, key=lambda r: r["ntiles"]):
+        nt = r["ntiles"]
+        m = C.read_mixed(r["fid"])
+        total, cube_stage, vec_stage = m["total"], m["aic"]["active"], m["aiv"]["active"]
+        fill = _aic_pipe_first(r["fid"], "MTE2")[0]   # cube1(0) first-load start ~ 0 -> absorbed
+        mf = max(cube_stage, vec_stage) + fill
+        serial = t1 * nt                              # if the 3 stages did NOT overlap across tiles
+        two_cube = cube_stage / nt                    # AIC work per NT step (~ 2 x one cube tile)
+        print(f"  {nt:>3} | {cube_stage:>9} {vec_stage:>8} {fill:>5} | {total:>6} {mf:>8} {total / mf:>7.2f}"
+              f" | {serial:>6} {total / serial:>5.2f} {two_cube:>8.0f}")
+    print("  -> the two cubes OVERLAP (pipeline on the AIC): total ~ 0.5x the fully-serial NT*(cube1+vec+")
+    print("     cube2) reference (t/srl ~ 0.5), and cube_stage/NT ~ 2 cube tiles (the AIC stays busy on")
+    print("     cube1[k+1] while vec[k]/cube2[k-1] proceed). The AIC (cube1+cube2) is the bottleneck and")
+    print("     cube1 starts at t~0, so the fill is ABSORBED (like mixed_vcv): total = max(cube,vec) + fill,")
+    print("     fill~0, t/(m+f)~1. Separate ping-pong buffers are what avoid the #1900 cube-cube serialize.")
+
+
 ALL = {
     "mixed_overlap": analyze_overlap,
     "mixed_serial": analyze_serial,
     "mixed_ddr_bound": analyze_ddr_bound,
     "mixed_contention": analyze_contention,
+    "mixed_vcv": analyze_vcv,
+    "mixed_vc": analyze_vc,
+    "mixed_cvc": analyze_cvc,
 }
 
 

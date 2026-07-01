@@ -56,16 +56,18 @@ The model charges `latency = fill + max(cube_stage, vec_stage, ddr_lat)` for eve
 | --- | --- | --- |
 | the `max(cube, vec, …)` **overlap** | **real, but only when skewed** | overlap `t/pipe → 0.95`; serial is `cube+vec`, **over-credited up to 2.26×** |
 | an implicit **serial fallback = `cube+vec`** | **under-estimates the true serial** | serial `t/srl` 1.00→1.34 — real serialization also costs the intra-unit pipeline |
-| a **`fill`** term | **needed; = one cube tile** | fill = AIV `active_start` = 2426 cy (bm128), 58% of the wall at NT=1, 18% at NT=8 |
+| a **`fill`** term | **= the bottleneck unit's INITIAL IDLE** (not "one cube tile") | Grounded across all 4 shapes (`c→v`, `v→c`, `v→c→v`, `c→v→c`): fill **adds** one producer-tile when the output stage's unit is idle at the start (2-stage — `c→v` fill=`cube_tile`, `v→c` fill=`vec1_tile`; both `t/(max+fill)=1.00`), and is **absorbed** when that unit already runs an earlier stage (3-stage `v→c→v`/`c→v→c` — `total==max` to ~1 cy). Amortizes 58%→18% (NT 1→8) when it adds |
 | the **1:2 mix-cluster** (`cores_used=3·eff_units`) | **consistent** | `VEC_CORES_PER_AIC=2`; per-core AIV wall = half the vector work |
 | the **`ddr_lat`** term | **grounded — single-core subsumed; cross-unit pool is the real term** | `mixed_ddr_bound` (K 16→512): the single-core GM is **subsumed** into the stages (`max(cube,vec,ddr) == max(cube,vec)`; the max GM port ≤ its stage; `ddr_cycles` fixed to max-over-ports). `mixed_contention` (multi-core): the cube (`GM_TO_L1`) + vector (`GM_TO_UB`) reads share **one** 900 GiB/s pool — past the knee both collapse to `900/B`, matching `par(active, peak)=min(peak, 900/B)` to **0%**. So `ddr_lat` is the *cross-unit shared-HBM* term and **only** that — a single-core ddr term double-counts |
 
 **Net for the scheduler:** the model is right that a *skewed* mixed kernel overlaps to
-`max(cube, vec)`, but it (a) must add the one-tile `fill`, (b) must not credit the overlap when
-the loop can't be skewed (consumer-role / multi-round-trip → serial, which is *worse* than its
-`cube+vec` fallback), and (c) needs **no separate single-core `ddr` term** — the GM traffic is
-subsumed into `max(cube, vec)` (grounded by `mixed_ddr_bound`); `ddr_lat` earns its place only
-as the cross-unit shared-HBM-read contention.
+`max(cube, vec)`, but it (a) must add `fill` = the **bottleneck unit's initial idle** (one
+producer-tile for a 2-stage kernel; ~0 for a 3-stage kernel where the output unit does
+double-duty), (b) must not credit the overlap only for a **genuine cross-tile carry / multi
+round-trip** (single round-trip — `c→v`, `v→c`, `v→c→v`, `c→v→c` — all overlap; the serial
+fallback `cube+vec` even *under*-estimates the true serial by 1.0→1.34×), and (c) needs **no
+separate single-core `ddr` term** — subsumed into `max(cube, vec)` (`mixed_ddr_bound`); `ddr_lat`
+earns its place only as the cross-unit shared-HBM-read contention.
 
 ## Status of the planned experiments
 
@@ -87,4 +89,10 @@ as the cross-unit shared-HBM-read contention.
   one `total_read_gibs` knob throttles both read pipe-types. The cap is set in-kernel via
   `SetHillBandwidthModel`, which overrides `PTO_BW_MODE=fitted`, so the default binary's
   uncapped-vs-capped pair *is* the flat-vs-contention comparison.)
-- **mixed_filldrain** — covered by the NTILES sweep (`fill` = one cube tile).
+- **Shape sweep (mixed_vcv / mixed_vc / mixed_cvc)** — **done**. The 4 canonical
+  single-round-trip shapes — `c→v` (epilogue), `v→c` (prologue), `v→c→v`, `c→v→c` (flash-decode)
+  — grounding the fill rule in the cross-check table. `c→v→c` also confirms the two cube matmuls
+  **overlap** (`t/srl → 0.49`, ~2× vs serial) under *separate* ping-pong buffers, validating
+  upstream **#1900**'s per-stage buffer separation (its depth-2 skew is what unblocks this). The
+  `fill` rule (bottleneck initial idle: adds for 2-stage, absorbed for 3-stage) holds in every
+  shape's NTILES sweep, so `mixed_filldrain` is subsumed.

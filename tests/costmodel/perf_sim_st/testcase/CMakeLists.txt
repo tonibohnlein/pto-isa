@@ -61,6 +61,9 @@ set(ALL_TESTCASES
     mixed_serial
     mixed_ddr_bound
     mixed_contention
+    mixed_vcv
+    mixed_vc
+    mixed_cvc
 )
 
 foreach(TESTCASE ${ALL_TESTCASES})
