@@ -233,10 +233,14 @@ inline std::string InstrName(const InstrRecord &instr, uint64_t seq, bool includ
 {
     std::string name = instr.opcode + "(" + std::to_string(instr.rows) + "x" + std::to_string(instr.cols) +
                        (instr.dtype.empty() ? "" : ",") + instr.dtype + ")";
+    name += "{pipe=" + std::string(PipeStageName(instr.stage));
+    if (!instr.tile_args.empty())
+        name += ";tiles=" + instr.tile_args;
+    if (!instr.scalar_args.empty())
+        name += ";scalars=" + instr.scalar_args;
+    name += "}";
     if (include_seq)
         name += ":" + std::to_string(seq);
-    if (!instr.tile_args.empty())
-        name += " [" + instr.tile_args + "]";
     return name;
 }
 

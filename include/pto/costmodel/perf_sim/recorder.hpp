@@ -14,6 +14,7 @@ See LICENSE in the root of the software repository for the full text of the Lice
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <vector>
 
 namespace pto::perf_sim {
@@ -75,7 +76,8 @@ inline bool IsCubeSidePipe(int hw_pipe) { return hw_pipe == PIPE_MTE1 || hw_pipe
 struct InstrRecord {
     std::string opcode;    // "TLOAD", "TADD", ...
     std::string dtype;     // "fp16", "fp32", "int8", ...
-    std::string tile_args; // stringified tile arguments, e.g. "ub_out, ub_a, ub_b"
+    std::string tile_args; // canonical dtype/shape of every tile operand
+    std::string scalar_args; // canonical values of scalar operands visible at the PTO API
     int rows = 0;
     int cols = 0;
     uint64_t estimated_cycles = 0;
@@ -175,6 +177,56 @@ public:
 private:
     static uint64_t NextSeq() { return SharedNextSeq(); }
 };
+
+template <typename T>
+inline const char* ScalarAccessDtypeName()
+{
+    if constexpr (std::is_same_v<T, float>)
+        return "fp32";
+    if constexpr (std::is_same_v<T, half> && std::is_same_v<half, bfloat16_t>)
+        return "fp16_or_bf16";
+    if constexpr (std::is_same_v<T, half>)
+        return "fp16";
+    if constexpr (std::is_same_v<T, bfloat16_t>)
+        return "bf16";
+    if constexpr (std::is_same_v<T, int32_t>)
+        return "int32";
+    if constexpr (std::is_same_v<T, uint32_t>)
+        return "uint32";
+    if constexpr (std::is_same_v<T, int16_t>)
+        return "int16";
+    if constexpr (std::is_same_v<T, uint16_t>)
+        return "uint16";
+    if constexpr (std::is_same_v<T, int8_t>)
+        return "int8";
+    if constexpr (std::is_same_v<T, uint8_t>)
+        return "uint8";
+    return "unknown";
+}
+
+// TGetVal/TSetVal lower to direct UB scalar loads/stores rather than PTO ISA
+// wrappers. Record that lowering explicitly instead of inventing instruction
+// headers for operations that do not exist in the ISA include tree.
+template <typename T>
+inline void RecordTileScalarAccess(
+    const char* opcode, int rows, int cols, uint32_t offset, uint64_t location, uint64_t block_layout,
+    uint64_t storage_layout, uint64_t pad, uint64_t compact)
+{
+    InstrRecord record;
+    record.opcode = opcode;
+    record.dtype = ScalarAccessDtypeName<T>();
+    record.tile_args = std::string(record.dtype) + ":" + std::to_string(rows) + "x" + std::to_string(cols) +
+                       ":loc=" + std::to_string(location) + ":storage=" + std::to_string(rows) + "x" +
+                       std::to_string(cols) + ":b=" + std::to_string(block_layout) +
+                       ":s=" + std::to_string(storage_layout) + ":pad=" + std::to_string(pad) +
+                       ":compact=" + std::to_string(compact);
+    record.scalar_args = "u:" + std::to_string(offset);
+    record.rows = rows;
+    record.cols = cols;
+    record.estimated_cycles = 1;
+    record.stage = PipeStage::Scalar;
+    PtoRecorder::Record(std::move(record));
+}
 
 // ── Sync event recorder (per-core, thread-local) ──
 
@@ -315,6 +367,12 @@ struct TileTraits<T> {
     {
         if constexpr (std::is_same_v<DType, float>)
             return "fp32";
+        else if constexpr (std::is_same_v<DType, half> && std::is_same_v<half, bfloat16_t>)
+            return "fp16_or_bf16";
+        else if constexpr (std::is_same_v<DType, half>)
+            return "fp16";
+        else if constexpr (std::is_same_v<DType, bfloat16_t>)
+            return "bf16";
         else if constexpr (std::is_same_v<DType, int32_t>)
             return "int32";
         else if constexpr (std::is_same_v<DType, uint32_t>)
@@ -328,7 +386,7 @@ struct TileTraits<T> {
         else if constexpr (std::is_same_v<DType, uint8_t>)
             return "uint8";
         else
-            return "fp16";
+            return "unknown";
     }
 };
 

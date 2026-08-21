@@ -11,6 +11,8 @@
 cmake_minimum_required(VERSION 3.16)
 project(pto_test_perf_sim_st)
 
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -19,6 +21,35 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 
 add_definitions(-D__COSTMODEL -D__NPU_ARCH__=2201 -DPTO_COMM_NOT_SUPPORTED)
+
+# lightweight_costmodel.hpp includes both architecture formula backends.  Keep
+# their generated headers in the build tree so a clean Perf-Sim build never
+# writes generated files into the source checkout.
+set(PTO_FORMULA_GENERATED_ROOT "${CMAKE_BINARY_DIR}/generated")
+set(PTO_FORMULA_GENERATED_HEADERS)
+foreach(_pto_arch IN ITEMS a2a3 a5)
+    set(_pto_formula_source
+        "${PROJECT_SOURCE_DIR}/../../../include/pto/costmodel/${_pto_arch}/formula_costmodel")
+    set(_pto_formula_build
+        "${PTO_FORMULA_GENERATED_ROOT}/pto/costmodel/${_pto_arch}/formula_costmodel")
+    set(_pto_formula_header "${_pto_formula_build}/formula_params_generated.hpp")
+    add_custom_command(
+        OUTPUT "${_pto_formula_header}"
+        COMMAND "${CMAKE_COMMAND}" -E make_directory "${_pto_formula_build}"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                "${_pto_formula_source}/formula_params.csv" "${_pto_formula_build}/formula_params.csv"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                "${_pto_formula_source}/gen_formula_params_header.py"
+                "${_pto_formula_build}/gen_formula_params_header.py"
+        COMMAND "${Python3_EXECUTABLE}" "${_pto_formula_build}/gen_formula_params_header.py"
+        DEPENDS
+            "${_pto_formula_source}/formula_params.csv"
+            "${_pto_formula_source}/gen_formula_params_header.py"
+        VERBATIM
+    )
+    list(APPEND PTO_FORMULA_GENERATED_HEADERS "${_pto_formula_header}")
+endforeach()
+add_custom_target(pto_formula_params_generated DEPENDS ${PTO_FORMULA_GENERATED_HEADERS})
 
 # GTest is required for CPU STs. Prefer a system installation, but fall back to
 # fetching googletest to make macOS builds self-contained.

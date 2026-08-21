@@ -10,8 +10,10 @@
 
 function(pto_costmodel_sim_st NAME)
     add_executable(${NAME} main.cpp)
+    add_dependencies(${NAME} pto_formula_params_generated)
     target_compile_options(${NAME} PRIVATE ${CMAKE_CPP_COMPILE_OPTIONS} -std=c++23)
     target_include_directories(${NAME} PRIVATE
+        ${PTO_FORMULA_GENERATED_ROOT}
         ${PROJECT_SOURCE_DIR}/../../../include/pto/costmodel/stubs
         ${PROJECT_SOURCE_DIR}/../../../include/
         ${PROJECT_SOURCE_DIR}/../../../include/common
@@ -35,6 +37,7 @@ set(ALL_TESTCASES
     gemm_perf_sim
     conv2d_perf_sim
     topk_perf_sim
+    formula_ops_perf_sim
     fa_perf_sim
 )
 

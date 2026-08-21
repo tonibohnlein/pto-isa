@@ -1,0 +1,2 @@
+pto_costmodel_sim_st(formula_ops_perf_sim)
+target_compile_options(formula_ops_perf_sim PRIVATE -D__DAV_VEC__)

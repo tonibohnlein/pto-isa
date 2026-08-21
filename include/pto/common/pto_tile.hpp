@@ -25,6 +25,15 @@ See LICENSE in the root of the software repository for the full text of the Lice
 
 namespace pto {
 
+#if defined(__COSTMODEL)
+namespace perf_sim {
+template <typename T>
+void RecordTileScalarAccess(
+    const char* opcode, int rows, int cols, uint32_t offset, uint64_t location, uint64_t block_layout,
+    uint64_t storage_layout, uint64_t pad, uint64_t compact);
+} // namespace perf_sim
+#endif
+
 constexpr int DYNAMIC = -1;
 
 template <int64_t N1 = DYNAMIC, int64_t N2 = DYNAMIC, int64_t N3 = DYNAMIC, int64_t N4 = DYNAMIC, int64_t N5 = DYNAMIC>
@@ -1444,15 +1453,29 @@ public:
     __tf__ AICORE void SetValue(const uint32_t offset, const DType val)
     {
         static_assert(Loc == TileType::Vec, "Location of tile must be Location::Vec.");
+#if defined(__COSTMODEL)
+        (void)val;
+        perf_sim::RecordTileScalarAccess<DType>(
+            "TSETVAL", Rows, Cols, offset, static_cast<uint64_t>(Loc), static_cast<uint64_t>(BFractal),
+            static_cast<uint64_t>(SFractal), static_cast<uint64_t>(PadVal), static_cast<uint64_t>(Compact));
+#else
         __ubuf__ DType* ptr = (__ubuf__ DType*)__cce_get_tile_ptr(data_);
         *(ptr + offset) = val;
+#endif
     }
 
     __tf__ AICORE DType GetValue(const uint32_t offset)
     {
         static_assert(Loc == TileType::Vec, "Location of tile must be Location::Vec.");
+#if defined(__COSTMODEL)
+        perf_sim::RecordTileScalarAccess<DType>(
+            "TGETVAL", Rows, Cols, offset, static_cast<uint64_t>(Loc), static_cast<uint64_t>(BFractal),
+            static_cast<uint64_t>(SFractal), static_cast<uint64_t>(PadVal), static_cast<uint64_t>(Compact));
+        return DType{};
+#else
         __ubuf__ DType* ptr = (__ubuf__ DType*)__cce_get_tile_ptr(data_);
         return *(ptr + offset);
+#endif
     }
     // constructor for static shape
     AICORE Tile()

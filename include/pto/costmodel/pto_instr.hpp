@@ -10,7 +10,12 @@ See LICENSE in the root of the software repository for the full text of the Lice
 #ifndef PTO_INSTR_HPP
 #define PTO_INSTR_HPP
 #include <cstdint>
+#include <bit>
+#include <sstream>
+#include <string>
 #include <string_view>
+#include <type_traits>
+#include <vector>
 
 // Intentionally reuse the common PTO include guard so this header can act as a
 // drop-in replacement when <pto/pto-inst.hpp> selects it for __COSTMODEL.
@@ -103,6 +108,123 @@ inline bool TryTileInfo(int& rows, int& cols, std::string& dtype, T&& tile)
     return false;
 }
 
+struct TileSignature {
+    int rows;
+    int cols;
+    std::string dtype;
+    std::string canonical;
+};
+
+template <typename T>
+inline bool TryTileSignature(std::vector<TileSignature>& tiles, T&& value)
+{
+    int rows = 0;
+    int cols = 0;
+    std::string dtype;
+    if (!TryTileInfo(rows, cols, dtype, std::forward<T>(value))) {
+        return false;
+    }
+    using U = std::remove_cvref_t<T>;
+    std::ostringstream signature;
+    signature << dtype << ':' << rows << 'x' << cols;
+    if constexpr (requires {
+                      U::Loc;
+                      U::Rows;
+                      U::Cols;
+                      U::BFractal;
+                      U::SFractal;
+                      U::PadVal;
+                      U::Compact;
+                  }) {
+        signature << ":loc=" << static_cast<uint64_t>(U::Loc) << ":storage=" << U::Rows << 'x' << U::Cols
+                  << ":b=" << static_cast<uint64_t>(U::BFractal) << ":s=" << static_cast<uint64_t>(U::SFractal)
+                  << ":pad=" << static_cast<uint64_t>(U::PadVal) << ":compact=" << static_cast<uint64_t>(U::Compact);
+    }
+    tiles.push_back({rows, cols, std::move(dtype), signature.str()});
+    return true;
+}
+
+template <typename T>
+inline void AppendScalarSignature(std::vector<std::string>& scalars, T&& value)
+{
+    using U = std::remove_cvref_t<T>;
+    std::ostringstream stream;
+    if constexpr (std::is_same_v<U, bool>) {
+        stream << "bool:" << (value ? 1 : 0);
+    } else if constexpr (std::is_enum_v<U>) {
+        using Underlying = std::underlying_type_t<U>;
+        if constexpr (std::is_signed_v<Underlying>) {
+            stream << "enum:" << static_cast<int64_t>(static_cast<Underlying>(value));
+        } else {
+            stream << "enum:" << static_cast<uint64_t>(static_cast<Underlying>(value));
+        }
+    } else if constexpr (std::is_integral_v<U>) {
+        if constexpr (std::is_signed_v<U>) {
+            stream << "i:" << static_cast<int64_t>(value);
+        } else {
+            stream << "u:" << static_cast<uint64_t>(value);
+        }
+    } else if constexpr (std::is_same_v<U, float>) {
+        stream << "f32:0x" << std::hex << std::bit_cast<uint32_t>(value);
+    } else if constexpr (std::is_same_v<U, double>) {
+        stream << "f64:0x" << std::hex << std::bit_cast<uint64_t>(value);
+    } else if constexpr (std::is_same_v<U, half> && std::is_same_v<half, bfloat16_t>) {
+        stream << "fp16_or_bf16:0x" << std::hex << std::bit_cast<uint16_t>(value);
+    } else if constexpr (std::is_same_v<U, half>) {
+        stream << "fp16:0x" << std::hex << std::bit_cast<uint16_t>(value);
+    } else if constexpr (std::is_same_v<U, bfloat16_t>) {
+        stream << "bf16:0x" << std::hex << std::bit_cast<uint16_t>(value);
+    } else {
+        return;
+    }
+    scalars.push_back(stream.str());
+}
+
+template <typename T>
+inline void CollectArgumentSignature(std::vector<TileSignature>& tiles, std::vector<std::string>& scalars, T&& value)
+{
+    if (!TryTileSignature(tiles, std::forward<T>(value))) {
+        AppendScalarSignature(scalars, std::forward<T>(value));
+    }
+}
+
+template <typename... Args>
+inline void CollectArgumentSignatures(
+    std::vector<TileSignature>& tiles, std::vector<std::string>& scalars, Args&&... args)
+{
+    (CollectArgumentSignature(tiles, scalars, std::forward<Args>(args)), ...);
+}
+
+inline bool UsesSourceWorkShape(std::string_view opcode)
+{
+    return opcode == "TROWSUM" || opcode == "TROWMAX" || opcode == "TROWMIN" || opcode == "TROWPROD" ||
+           opcode == "TCOLSUM" || opcode == "TCOLMAX" || opcode == "TCOLMIN" || opcode == "TCOLPROD";
+}
+
+inline std::string JoinTileSignatures(const std::vector<TileSignature>& tiles)
+{
+    std::ostringstream stream;
+    for (size_t index = 0; index < tiles.size(); ++index) {
+        if (index != 0) {
+            stream << ',';
+        }
+        stream << tiles[index].canonical;
+    }
+    return stream.str();
+}
+
+inline std::string JoinScalarSignatures(const std::vector<std::string>& scalars)
+{
+    std::ostringstream stream;
+    for (size_t index = 0; index < scalars.size(); ++index) {
+        if (index != 0) {
+            stream << ',';
+        }
+        stream << scalars[index];
+    }
+    return stream.str();
+}
+
 // Recursive: try tiles in order, extract dims+dtype from first one that has them.
 template <typename T>
 inline void ExtractFirstTileInfo(int& rows, int& cols, std::string& dtype, T&& tile)
@@ -136,9 +258,17 @@ inline void RecordInstr(const char* opcode, auto&& first_tile, auto&&... rest_ti
     }
     r.wait_count = dep.wait_count;
 
-    // Tile dimensions + dtype: try each tile argument in order, use first one with info.
-    // For TSTORE(dst=GlobalData, src=TileData), this skips GlobalData and uses TileData.
-    ExtractFirstTileInfo(r.rows, r.cols, r.dtype, first_tile, rest_tiles...);
+    std::vector<TileSignature> tiles;
+    std::vector<std::string> scalars;
+    CollectArgumentSignatures(tiles, scalars, first_tile, rest_tiles...);
+    if (!tiles.empty()) {
+        const size_t work_index = UsesSourceWorkShape(opcode) && tiles.size() > 1 ? 1 : 0;
+        r.rows = tiles[work_index].rows;
+        r.cols = tiles[work_index].cols;
+        r.dtype = tiles[work_index].dtype;
+    }
+    r.tile_args = JoinTileSignatures(tiles);
+    r.scalar_args = JoinScalarSignatures(scalars);
 
     const uint64_t measured_cycles = GetLastPtoInstrCycles();
     const uint64_t estimated_cycles =
