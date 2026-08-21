@@ -9,6 +9,7 @@ See LICENSE in the root of the software repository for the full text of the Lice
 */
 #ifndef PTO_INSTR_HPP
 #define PTO_INSTR_HPP
+#include <cstdint>
 #include <string_view>
 
 // Intentionally reuse the common PTO include guard so this header can act as a
@@ -17,6 +18,18 @@ See LICENSE in the root of the software repository for the full text of the Lice
 #include "pto/common/debug.h"
 #include "pto/common/event.hpp"
 #include "pto/common/tassign_check.hpp"
+
+namespace pto {
+
+struct MrgSortExecutedNumList {
+    uint16_t mrgSortList0;
+    uint16_t mrgSortList1;
+    uint16_t mrgSortList2;
+    uint16_t mrgSortList3;
+};
+
+} // namespace pto
+
 #include "pto/common/pto_instr_impl.hpp"
 #ifdef __COSTMODEL
 #include "pto/costmodel/trace.hpp"

@@ -20,8 +20,6 @@ inline void __pto_wait_flag(pipe_t, pipe_t, CceEventIdType) {}
 [[noreturn]] inline void trap() { std::terminate(); }
 
 inline int get_rsvd_cnt() { return 0; }
-inline int get_coreid() { return 0; }
-inline uint32_t get_block_num() { return 1; }
 inline uint64_t get_sys_cnt() { return 0; }
 
 // Stubs for NPU cache/barrier operations used by cross-core sync

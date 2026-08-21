@@ -18,6 +18,7 @@ namespace pto::mocker::evaluator {
 
 inline constexpr uint64_t kBlockBytes = 32;
 inline constexpr long double kBytesPerGb = 1024.0L * 1024.0L * 1024.0L;
+inline constexpr long double kMicrosPerSecond = 1.0e6L;
 inline constexpr long double kMainFrequencyHz = 1.85e9L;
 
 enum class PipeKey {

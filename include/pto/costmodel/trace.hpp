@@ -58,6 +58,7 @@ struct TraceState {
     std::vector<PtoInstrRecord> executed_pto;
     std::vector<std::size_t> active_pto_stack;
     std::array<CcePipeTraceState, kPipeKeyCount> cce_pipe_traces;
+    bool vector_count_mode = false;
 };
 
 inline thread_local TraceState g_trace_state;

@@ -73,8 +73,8 @@ inline uint64_t EstimateBandwidthCycles(uint64_t bytes, ::pto::mocker::evaluator
         return 0;
     }
     return static_cast<uint64_t>(
-        (static_cast<long double>(bytes) / ev::kBytesPerGb) / static_cast<long double>(bandwidth) *
-        CurrentArch().frequency_hz);
+        (static_cast<long double>(bytes) / ::pto::mocker::evaluator::kBytesPerGb) /
+        static_cast<long double>(bandwidth) * CurrentArch().frequency_hz);
 }
 
 inline void FlushPipeTail(::pto::mocker::evaluator::PipeKey pipe) { ::pto::mocker::FlushPendingTail(pipe); }
