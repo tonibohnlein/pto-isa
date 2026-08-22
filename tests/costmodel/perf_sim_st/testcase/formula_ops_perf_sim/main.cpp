@@ -14,7 +14,9 @@ See LICENSE in the root of the software repository for details.
 #include <array>
 #include <cstddef>
 #include <iterator>
+#include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 using namespace pto;
@@ -110,7 +112,7 @@ void runRmsNormSignatures()
 
 void runTopkSelectSignatures()
 {
-    static thread_local std::array<std::byte, 2 * 1024 * 1024> storage{};
+    static thread_local std::array<std::byte, 4 * 1024 * 1024> storage{};
     VecTile<float, 1, 4096> scores(1, 4096);
     VecTile<int32_t, 1, 4096> indices(1, 4096);
     VecTile<uint32_t, 1, 2048> ci2048(1, 2048);
@@ -121,13 +123,28 @@ void runTopkSelectSignatures()
     VecTile<float, 1, 512> unpadded512(1, 512);
     Padded512 padded512(1, 512);
 
+    using SortSrc2048 = VecTile<float, 1, 2048>;
+    using SortDst4096 = VecTile<float, 1, 4096>;
+    using SortIdx2048 = VecTile<uint32_t, 1, 2048>;
+    SortSrc2048 sort_src2048(1, 2048);
+    SortDst4096 sort_dst4096(1, 4096);
+    SortIdx2048 sort_idx2048(1, 2048);
+
+    using PaddedSortSrc512 =
+        Tile<TileType::Vec, float, 1, 512, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Min>;
+    using PaddedSortDst1024 =
+        Tile<TileType::Vec, float, 1, 1024, BLayout::RowMajor, -1, -1, SLayout::NoneBox, 512, PadValue::Min>;
+    using PaddedSortIdx512 = VecTile<uint32_t, 1, 512>;
+    PaddedSortSrc512 sort_src512(1, 512);
+    PaddedSortDst1024 sort_dst1024(1, 1024);
+    PaddedSortIdx512 sort_idx512(1, 512);
+
     using SortSrc4096 = VecTile<float, 1, 4096>;
     using SortDst8192 = VecTile<float, 1, 8192>;
     using SortIdx4096 = VecTile<uint32_t, 1, 4096>;
-    SortSrc4096 sort_src(1, 4096);
-    SortDst8192 sort_dst(1, 8192);
-    SortIdx4096 sort_idx(1, 4096);
-    SortSrc4096 sort_tmp(1, 4096);
+    SortSrc4096 sort_src4096(1, 4096);
+    SortDst8192 sort_dst8192(1, 8192);
+    SortIdx4096 sort_idx4096(1, 4096);
 
     VecTile<float, 1, 128> merge_dst(1, 128);
     VecTile<float, 1, 128> merge_tmp(1, 128);
@@ -156,10 +173,15 @@ void runTopkSelectSignatures()
     assign(ci4096);
     assign(unpadded512);
     assign(padded512);
-    assign(sort_src);
-    assign(sort_dst);
-    assign(sort_idx);
-    assign(sort_tmp);
+    assign(sort_src2048);
+    assign(sort_dst4096);
+    assign(sort_idx2048);
+    assign(sort_src512);
+    assign(sort_dst1024);
+    assign(sort_idx512);
+    assign(sort_src4096);
+    assign(sort_dst8192);
+    assign(sort_idx4096);
     assign(merge_dst);
     assign(merge_tmp);
     assign(merge_src0);
@@ -176,10 +198,19 @@ void runTopkSelectSignatures()
     TCI<decltype(ci512), uint32_t, false>(ci512, 0U);
     TCI<decltype(ci4096), uint32_t, false>(ci4096, 0U);
     TFILLPAD(padded512, unpadded512);
-    TSORT32(sort_dst, sort_src, sort_idx, sort_tmp);
-    TMRGSORT(sort_dst, sort_dst, 64U);
-    TMRGSORT(sort_dst, sort_dst, 256U);
-    TMRGSORT(sort_dst, sort_dst, 1024U);
+    TSORT32(sort_dst4096, sort_src2048, sort_idx2048);
+    TMRGSORT(sort_dst4096, sort_dst4096, 64U);
+    TMRGSORT(sort_dst4096, sort_dst4096, 256U);
+    TMRGSORT(sort_dst4096, sort_dst4096, 1024U);
+
+    TSORT32(sort_dst1024, sort_src512, sort_idx512);
+    TMRGSORT(sort_dst1024, sort_dst1024, 64U);
+    TMRGSORT(sort_dst1024, sort_dst1024, 256U);
+
+    TSORT32(sort_dst8192, sort_src4096, sort_idx4096);
+    TMRGSORT(sort_dst8192, sort_dst8192, 64U);
+    TMRGSORT(sort_dst8192, sort_dst8192, 256U);
+    TMRGSORT(sort_dst8192, sort_dst8192, 1024U);
 
     MrgSortExecutedNumList executed{};
     TMRGSORT<decltype(merge_dst), decltype(merge_tmp), decltype(merge_src0), decltype(merge_src1), false>(
@@ -206,6 +237,18 @@ void runTopkSelectSignatures()
 bool HasOpcode(const std::vector<::pto::perf_sim::InstrRecord>& records, std::string_view opcode)
 {
     return std::ranges::any_of(records, [opcode](const auto& record) { return record.opcode == opcode; });
+}
+
+bool HasSignature(
+    const std::vector<::pto::perf_sim::InstrRecord>& records, std::string_view opcode, int rows, int cols,
+    size_t tileCount, std::string_view scalars = {})
+{
+    return std::ranges::any_of(records, [&](const auto& record) {
+        const size_t recordedTileCount =
+            record.tile_args.empty() ? 0 : static_cast<size_t>(std::ranges::count(record.tile_args, ',')) + 1;
+        return record.opcode == opcode && record.rows == rows && record.cols == cols &&
+               recordedTileCount == tileCount && record.scalar_args == scalars;
+    });
 }
 
 } // namespace
@@ -275,4 +318,14 @@ TEST(FormulaOpsPerfSim, RecordsTopkSelectSignatures)
          {"TEXPANDS", "TCI", "TFILLPAD", "TSORT32", "TMRGSORT", "TGATHER", "TGETVAL", "TSETVAL"}) {
         EXPECT_TRUE(HasOpcode(records, opcode)) << opcode;
     }
+    for (int cols : {1024, 4096, 8192}) {
+        EXPECT_TRUE(HasSignature(records, "TSORT32", 1, cols, 3)) << "TSORT32 1x" << cols;
+    }
+    for (auto [cols, blockLen] : std::array{
+             std::pair{1024, 64}, std::pair{1024, 256}, std::pair{4096, 64}, std::pair{4096, 256},
+             std::pair{4096, 1024}, std::pair{8192, 64}, std::pair{8192, 256}, std::pair{8192, 1024}}) {
+        EXPECT_TRUE(HasSignature(records, "TMRGSORT", 1, cols, 2, "u:" + std::to_string(blockLen)))
+            << "TMRGSORT 1x" << cols << " blockLen=" << blockLen;
+    }
+    EXPECT_TRUE(HasSignature(records, "TMRGSORT", 1, 128, 4));
 }
