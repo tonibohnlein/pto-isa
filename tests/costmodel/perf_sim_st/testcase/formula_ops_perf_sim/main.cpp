@@ -110,6 +110,74 @@ void runRmsNormSignatures()
     TCOLEXPANDMUL(fp32_out, fp32_full, col_scale);
 }
 
+void runBroadCorpusSignatures()
+{
+    VecTile<float, 16, 64> expands16x64(16, 64);
+    VecTile<float, 4, 64> expands4x64(4, 64);
+    VecTile<float, 8, 128> expands8x128(8, 128);
+    VecTile<float, 1, 16> expands1x16(1, 16);
+    VecTile<float, 1, 8> recip1x8Src(1, 8);
+    VecTile<float, 1, 8> recip1x8Dst(1, 8);
+    VecTile<float, 1, 16> recip1x16Src(1, 16);
+    VecTile<float, 1, 16> recip1x16Dst(1, 16);
+    VecTile<float, 1, 128> recip1x128Src(1, 128);
+    VecTile<float, 1, 128> recip1x128Dst(1, 128);
+    VecTile<float, 8, 8> recip8x8Src(8, 8);
+    VecTile<float, 8, 8> recip8x8Dst(8, 8);
+    VecTile<float, 8, 512> mul8x512Src0(8, 512);
+    VecTile<float, 8, 512> mul8x512Src1(8, 512);
+    VecTile<float, 8, 512> mul8x512Dst(8, 512);
+    using MatA = Tile<TileType::Mat, bfloat16_t, 16, 512, BLayout::ColMajor, 16, 512, SLayout::RowMajor, 512>;
+    using MatB = Tile<TileType::Mat, bfloat16_t, 512, 64, BLayout::RowMajor, 512, 64, SLayout::ColMajor, 512>;
+    using Left = TileLeftCompact<bfloat16_t, 16, 256, 16, 256>;
+    using Right = TileRightCompact<bfloat16_t, 256, 64, 256, 64>;
+    MatA matA;
+    MatB matB;
+    Left left;
+    Right right;
+
+    uint64_t address = 0;
+    auto assign = [&address](auto& tile) {
+        TASSIGN(tile, address);
+        address += 0x20000;
+    };
+    assign(expands16x64);
+    assign(expands4x64);
+    assign(expands8x128);
+    assign(expands1x16);
+    assign(recip1x8Src);
+    assign(recip1x8Dst);
+    assign(recip1x16Src);
+    assign(recip1x16Dst);
+    assign(recip1x128Src);
+    assign(recip1x128Dst);
+    assign(recip8x8Src);
+    assign(recip8x8Dst);
+    assign(mul8x512Src0);
+    assign(mul8x512Src1);
+    assign(mul8x512Dst);
+    assign(matA);
+    assign(matB);
+    assign(left);
+    assign(right);
+
+    TEXPANDS(expands16x64, 0.0F);
+    TEXPANDS(expands16x64, 1.0F);
+    TEXPANDS(expands4x64, 1.0F);
+    TEXPANDS(expands8x128, 0.0F);
+    TEXPANDS(expands8x128, -3.4028234663852886e38F);
+    TEXPANDS(expands1x16, 0.0F);
+    TRECIP(recip1x8Dst, recip1x8Src);
+    TRECIP(recip1x16Dst, recip1x16Src);
+    TRECIP(recip1x128Dst, recip1x128Src);
+    TRECIP(recip8x8Dst, recip8x8Src);
+    TMUL(mul8x512Dst, mul8x512Src0, mul8x512Src1);
+    TEXTRACT(left, matA, 0, 0);
+    TEXTRACT(left, matA, 0, 256);
+    TEXTRACT(right, matB, 0, 0);
+    TEXTRACT(right, matB, 256, 0);
+}
+
 void runTopkSelectSignatures()
 {
     static thread_local std::array<std::byte, 4 * 1024 * 1024> storage{};
@@ -290,6 +358,17 @@ TEST(FormulaOpsPerfSim, RecordsRmsNormSignatures)
           "TCOLEXPANDMUL"}) {
         EXPECT_TRUE(HasOpcode(records, opcode)) << opcode;
     }
+}
+
+TEST(FormulaOpsPerfSim, RecordsBroadCorpusSignatures)
+{
+    LAUNCH_KERNEL(runBroadCorpusSignatures, , (1, nullptr, nullptr));
+    const auto& records = ::pto::perf_sim::PtoRecorder::GetForCore(0);
+    EXPECT_EQ(std::ranges::count_if(records, [](const auto& record) { return record.opcode == "TEXPANDS"; }), 6);
+    // TRECIP lowers to a TDIVS-by-one instruction on A2/A3.
+    EXPECT_EQ(std::ranges::count_if(records, [](const auto& record) { return record.opcode == "TDIVS"; }), 4);
+    EXPECT_TRUE(HasSignature(records, "TMUL", 8, 512, 3));
+    EXPECT_EQ(std::ranges::count_if(records, [](const auto& record) { return record.opcode == "TEXTRACT"; }), 4);
 }
 
 TEST(FormulaOpsPerfSim, SeparatesSixteenBitDtypesAndConstantsWhenToolchainCanRepresentThem)
